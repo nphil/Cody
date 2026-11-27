@@ -258,6 +258,7 @@ export class DeviceBridge {
     changed: () => this.notify(),
   });
   private hostLossTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly awaitingHostReplay = new Set<string>();
 
   get attached(): boolean {
     return this.send !== null;
@@ -270,12 +271,12 @@ export class DeviceBridge {
   attach(send: Sender, revoke: () => void = () => {}): (() => void) & { isCurrent(): boolean } {
     const generation = ++this.hostGeneration;
     const previousRevoke = this.revokeHost;
-    this.clearHostLossTimer();
     this.send = send;
     this.revokeHost = revoke;
     // Revoke first: a former page must not finish a confirmation or write after
     // its successor becomes authoritative.
     if (previousRevoke) {
+      this.clearHostLossTimer();
       this.failAllPending("Device host authority was replaced by another browser page.");
       this.tunnels.closeAll("Device host authority was replaced by another browser page.");
       this.markOperationsCompletionUnknown("Device host authority was replaced before operation completion.");
@@ -301,20 +302,27 @@ export class DeviceBridge {
   private clearHostLossTimer(): void {
     if (this.hostLossTimer !== null) clearTimeout(this.hostLossTimer);
     this.hostLossTimer = null;
+    this.awaitingHostReplay.clear();
   }
 
   private scheduleHostLoss(): void {
     this.clearHostLossTimer();
+    for (const snapshot of this.operations.values()) {
+      if (!["succeeded", "failed", "cancelled"].includes(snapshot.state)) this.awaitingHostReplay.add(snapshot.id);
+    }
+    if (!this.awaitingHostReplay.size) return;
     this.hostLossTimer = setTimeout(() => {
       this.hostLossTimer = null;
-      this.markOperationsCompletionUnknown("The browser disconnected before operation completion; completion is unknown.");
+      this.markOperationsCompletionUnknown("The browser disconnected before operation completion; completion is unknown.", this.awaitingHostReplay);
+      this.awaitingHostReplay.clear();
     }, DEVICE_LIVENESS_TIMEOUT_MS);
     this.hostLossTimer.unref?.();
   }
 
-  private markOperationsCompletionUnknown(error: string): void {
+  private markOperationsCompletionUnknown(error: string, only?: ReadonlySet<string>): void {
     const now = Date.now();
     for (const snapshot of this.operations.values()) {
+      if (only && !only.has(snapshot.id)) continue;
       if (snapshot.state === "succeeded" || snapshot.state === "failed" || snapshot.state === "cancelled") continue;
       this.storeOperation({ ...snapshot, state: "failed", updatedAt: now, error }, undefined, true);
     }
@@ -732,6 +740,9 @@ export class DeviceBridge {
   }
 
   private storeOperation(snapshot: DeviceOperationSnapshot, event?: OperationEvent, terminal = false): void {
+    // A reconnecting page replays even unchanged snapshots. A new page with no
+    // memory of an old job must not leave it looking busy forever.
+    if (this.awaitingHostReplay.delete(snapshot.id) && !this.awaitingHostReplay.size) this.clearHostLossTimer();
     const previous = this.operations.get(snapshot.id);
     const previousSequence = previous?.events.at(-1)?.sequence ?? 0;
     if (event && event.sequence <= previousSequence) return;

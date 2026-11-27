@@ -38,6 +38,30 @@ Automatic prompt profiles keep configured private or loopback models usable. Win
 
 Manual and automatic compaction report observed lifecycle with elapsed status and progress when an engine provides it. When it cannot, Cody shows progress as indeterminate rather than inventing a percentage; no-op, error, cancellation, and unsupported outcomes are labelled honestly.
 
+## Android wireless debugging
+
+In a chat you own, open **Devices** to pair an Android 11 or newer device with
+the **Cody server**. The server must be able to reach the tablet on a trusted
+private network; it is not the PC running your browser. Use HTTPS to Cody
+when entering a pairing code remotely.
+
+1. On Android, open **Developer options → Wireless debugging → Pair device
+   with pairing code**. Enter the address and six-digit code in Cody's
+   pairing form, never in a chat message.
+2. Use the **connection port** on Android's main Wireless debugging screen,
+   not the temporary port in its pairing dialog. Leave Wireless debugging on.
+   No USB cable or PC is needed. If Android changes its port, update the
+   connection address rather than pairing from scratch.
+3. Ordinary commands run as Android's **shell** user, not root. Review the
+   exact command before allowing Magisk elevation. Cody approval does not
+   override Magisk's own policy on the tablet.
+
+Disconnect to stop using the tablet but keep its pairing; forget it to remove
+Cody's saved access. To revoke the key on Android too, tap **Forget** beside
+Cody in Android's **Paired devices** list. Don't publish an ADB port to the
+internet. [Android's protocol notes](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/docs/dev/adb_wifi.md)
+explain why the old port-5555 setup is not equivalent to encrypted pairing.
+
 ## Getting started (Docker, recommended)
 
 The container is the primary way to run Cody. It ships **engine-free** and
@@ -202,6 +226,7 @@ updates.
 | --- | --- |
 | `PORT` | Server port (default `30177`; `-p/--port` wins) |
 | `CODY_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins; the container binds `0.0.0.0`) |
+| `CODY_PUBLIC_ORIGIN` / `CODY_TRUSTED_PROXY_IP` | Required together for wireless Android over a reverse proxy: the browser’s HTTPS origin and the proxy’s exact backend peer IP (see Security notes below) |
 | `CODY_PASSWORD` | Optional password for the built-in `cody` account (login screen and HTTP Basic Auth) |
 | `CODY_REQUIRE_ACCOUNTS` | `1` forces auth on even with zero accounts (fresh instance shows only first-run setup; the Docker entrypoint sets this) |
 | `CODY_ALLOW_SIGNUP` | Set `0` to hide "Create an account" on the login screen (admins can still add accounts) |
@@ -225,6 +250,12 @@ migrated from ompweb's storage keys on first load.
 ## Security notes
 
 - Bare-metal Cody binds `127.0.0.1` by default; non-loopback exposure is an explicit opt-in for trusted networks only. Cody is not safe to expose publicly without HTTPS in front.
+- Wireless Android needs direct loopback (`http://localhost` or `http://127.0.0.1`) or HTTPS through a configured proxy. For Caddy:
+  1. Set `CODY_PUBLIC_ORIGIN=https://cody.example.com` on Cody, using the address people actually open.
+  2. Set `CODY_TRUSTED_PROXY_IP` to Caddy's exact source IP **as Cody sees it**, not the tablet IP or a forwarded client IP. Find it on the dedicated network Caddy shares with Cody, or look at the peer of a connection from Caddy to Cody's WebUI port (for example with `ss -tn` in Cody's network namespace). Don't trust an address shared with other clients through a network gateway.
+  3. Preserve `Host` in Caddy and let Caddy set `X-Forwarded-Proto: https` itself, not pass that header through from clients. Restrict direct backend access if it can arrive from the same IP as Caddy.
+
+  Without both settings, proxied wireless pairing and approvals are disabled. Other Cody features are unchanged.
 - The web perimeter: unauthenticated pages redirect to `/login`, APIs answer 401, and the terminal WebSocket enforces the same credentials plus same-origin upgrades.
 - File APIs are allow-listed to the selected workspace, its valid Git worktrees, session-referenced directories, and explicitly selected roots; paths are canonicalized against traversal and symlink escapes.
 - Browser terminals (and SSH, if enabled) execute as the container's user with full access to `/data` and `/workspace` — scope those mounts deliberately.

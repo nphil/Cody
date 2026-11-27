@@ -268,6 +268,8 @@ lib/
   composer-model-visibility.ts  browser mirror of the visibility file
   rpc-manager.ts  session registry, host tools, startRpcSession; isolated sidebar chats
   session-tools.ts  cross-session tools: list_sessions, session_status, read_session
+  devices/wireless-tools.ts, wireless-workspace.ts  chat-selected wireless ADB agent tools and confined workspace transfers
+  devices/wireless-origin.ts  verifies wireless browser ingress at the launcher's actual connection
   session-acquire.ts  live engine session for unattended work; SessionUnavailableError
   run-recovery/  unattended-run recovery: supervisor.ts journal.ts judge.ts limits.ts text.ts notify.ts shutdown.ts; token-burn guard: burn-detect.ts burn-trail.ts burn-guard.ts
   scheduled/  scheduled send; browser-safe: types.ts client.ts ui.ts sync.ts; server: store.ts service.ts scheduler.ts delivery.ts quota.ts tools.ts notify.ts access.ts
@@ -313,6 +315,9 @@ lib/
   helper-tier.ts  which helpers are expensive (heavy-task/deep-task or default/slow role), the reason the parent gave, cost per helper kind
 components/
   AppShell.tsx  layout, URL state, tabs
+  devices/WirelessCard.tsx  Android wireless pairing, status, reconnect and forget
+  devices/WirelessRootRequests.tsx  page-only approval of one exact Android command
+  devices/WirelessShell.tsx  the chat owner's manual Android command and result
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx  chat composition + completion sound
   ChatInput.tsx  input bar + model/thinking controls
@@ -410,6 +415,7 @@ hooks/
   useLocalAiScan.ts  client for /api/local-ai
   useSettingsHistory.ts  phone settings stack in browser history
   useAgentSession.ts  messages, streaming, SSE, fork
+  useWirelessAdb.ts  chat-bound wireless status and user actions (lib/devices/wireless-browser.ts)
   useHelperChoices.ts  models + roles for the Helper agents dropdowns
   claude-credits-notices.ts  pure plan-limit to API-credits notices
   useAudio.ts  completion sound, AudioContext unlock
@@ -624,7 +630,10 @@ Details: docs/agents/automation.md
 - Writes: never replay after disconnect/cancel/mode change. `context.confirm` declares risk; Fastboot partition flashing additionally needs the user's approval of the prepared target and image. ACK/CRC/progress is not readback proof; timeout means unknown completion.
 - Boundaries: never burn eFuses or write EDL boot0/boot1/rpmb or table-overlapping partitions; protected ESP/DFU/STM32/STK500 ranges need exact `allow-bootloader`/`allow-spi-boot`; MTK, CMSIS-DAP, UF2 not shipped.
 - ADB forward/reverse: "Host" = Cody server `127.0.0.1` only, never LAN; server verifies rules (`riskDeclared`, 16/session); one device listen address = one rule.
+- Wireless ADB: `device_list` discovers only this chat's selected tablet; `wireless_*` needs no browser. Structured actions run unprivileged; only a person in Devices can approve one exact shell/root command. No host ADB proxy or write replay.
+- Wireless pairing and approval require direct loopback or HTTPS at an explicitly pinned proxy peer and public origin; caller-supplied forwarding headers are not proof.
 - Operations: changing an operation tool means editing `DEVICE_OPERATION_TOOLS` AND `bin/cody-display-mcp.js`; pop-ups only via `noticeForOperation` (news, not progress); no hand-rolled packet loops in `eval`; BLE UUIDs via `canonicalBleUuid` ("0x18f0" breaks `requestDevice`).
+- Cancelling acquisition ends the operation's wait, not the browser's native USB call. Keep the old handle reserved until cleanup. `operation-evidence.ts` formats the stop source/time, waiting stage, connection generation and confirmed vs unknown transfers; regressions are in `operation-cancellation.test.mjs`.
 - Artifact import/list/export use the chat's workspace and browser, never a caller-chosen root; a factory image is not a device backup. Fastboot `DATA` may have one terminal NUL, never a different transfer length.
 - Evidence: emulator-tested only, unverified on real hardware; trust is no go-ahead for a test; `docs/hardware-host-helper.md` is design only.
 Details: docs/agents/hardware.md

@@ -4,6 +4,7 @@ import { Ban, Send } from "lucide-react";
 import { useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { memberOutcome, type MemberOutcome } from "@/lib/devices/jobs";
+import { describeEvidence } from "@/lib/devices/operation-evidence";
 import type { DeviceOperationManager, DeviceOperationSnapshot, OperationRiskBinding } from "@/lib/devices/operations";
 import { CopyButton } from "./CopyButton";
 import { OutcomeIcon } from "./job-icons";
@@ -56,6 +57,7 @@ export function OperationDetail({ manager, operation, deviceLabel }: { manager: 
   const declared = declaredBinding(operation);
   const lines = operation.output.map((entry) => entry.line);
   const shown = allLines ? lines : lines.slice(-LOG_TAIL_LINES);
+  const evidence = describeEvidence(operation, (at) => new Date(at).toLocaleString(locale));
   const { request, result } = operation;
   const subject = request.target ?? request.command;
   const details = result?.details && Object.keys(result.details).length > 0 ? JSON.stringify(result.details, null, 2) : null;
@@ -117,6 +119,13 @@ export function OperationDetail({ manager, operation, deviceLabel }: { manager: 
           )}
           <Fact label={t("devices.fact.operationId")}><code>{operation.id}</code></Fact>
         </dl>
+        {evidence.length > 0 && (
+          <div style={sectionStyle}>
+            {evidence.map((line) => (
+              <p key={line} style={{ margin: 0, fontSize: 12, lineHeight: 1.45, color: "var(--text)", overflowWrap: "anywhere" }}>{line}</p>
+            ))}
+          </div>
+        )}
       </section>
 
       <section aria-label={t("devices.sheet.log")} style={sectionStyle}>

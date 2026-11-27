@@ -38,6 +38,21 @@ import {
   type TrustedDevice,
 } from "./trust";
 import { pageTrustBook } from "./trust-client";
+import { abortable, UsbInterfaceClaimError } from "./usb-acquisition";
+import { isRecord } from "../type-guards";
+import {
+  STUCK_CLAIM_RECOVERY,
+  defaultCancelReason,
+  isSystemCancel,
+  isoTime,
+  type OperationCancelCause,
+  type OperationCancellation,
+  type OperationLease,
+  type OperationLeaseState,
+  type OperationSent,
+  type OperationStage,
+  type OperationStageName,
+} from "./operation-evidence";
 
 /**
  * Browser-owned artifacts. A runner receives bytes only through this session
@@ -52,19 +67,38 @@ export interface OperationArtifacts {
   findBySha256?(sessionId: string, sha256: string): Promise<Blob | undefined>;
 }
 
+/** What a provider can tell the manager while it opens a device: the step it is in and its own number for the handle. */
+export interface HardwareAcquisitionProgress {
+  step: string;
+  generation?: number;
+}
+
+export interface HardwareBorrowOptions {
+  interfaceNumber?: number;
+  alternateSetting?: number;
+  pinConnection?: boolean;
+  /**
+   * Aborts when nobody wants the connection any more (the operation was cancelled or stopped waiting). A provider stops taking
+   * native steps and rejects when it can; its device stays reserved until the native call it has in flight ends. The manager has
+   * already moved on and never uses what this promise settles with afterwards: a lease that arrives after the abort is released unused.
+   * If rejection precedes native cleanup, the error can carry `usbCleanup: Promise<void>`, which resolves when the reservation is free.
+   */
+  signal?: AbortSignal;
+  onProgress?: (progress: HardwareAcquisitionProgress) => void;
+}
+
 /** The bridge owns this lease. No raw tool or RX pump may use it while a run is active. */
- export interface HardwareTransportLease {
-   transport: HardwareTransport;
+export interface HardwareTransportLease {
+  transport: HardwareTransport;
   /** Stable grant identity captured before an ADB transport reconnect. */
   identity?: string;
-   release(): Promise<void>;
- }
- 
- export interface HardwareTransportProvider {
-   borrowHardwareTransport(
-     deviceId: string,
-     options?: { interfaceNumber?: number; alternateSetting?: number; pinConnection?: boolean },
-   ): Promise<HardwareTransportLease>;
+  /** The provider's own number for this handle: a late `release()` closes this handle and never a newer one. */
+  generation?: number;
+  release(): Promise<void>;
+}
+
+export interface HardwareTransportProvider {
+  borrowHardwareTransport(deviceId: string, options?: HardwareBorrowOptions): Promise<HardwareTransportLease>;
   /**
    * The SAME granted device again after it left the bus and came back. Rejects
    * unless `identity` is the stable identity the session was granted, and waits
@@ -74,7 +108,7 @@ export interface OperationArtifacts {
   reacquireHardwareTransport?(
     deviceId: string,
     identity: string,
-    options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal; timeoutMs?: number },
+    options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal; timeoutMs?: number; onProgress?: (progress: HardwareAcquisitionProgress) => void },
   ): Promise<HardwareTransportLease>;
   /**
    * The stable identity the granted device `deviceId` is attached under right now, or undefined when it is not
@@ -179,6 +213,12 @@ export interface DeviceOperationSnapshot {
   riskDeclared?: boolean;
   result?: HardwareResult;
   error?: string;
+  /** Who asked this operation to stop, and when. Set the moment the request is made, so a cancel that is still settling already says why. */
+  cancellation?: OperationCancellation;
+  /** What it is doing, or waiting for, right now. Absent once it ended. */
+  stage?: OperationStage;
+  /** The device connection it holds or is trying to take, and what went over it. */
+  lease?: OperationLease;
   output: readonly OperationOutput[];
   events: readonly OperationEvent[];
 }
@@ -205,6 +245,8 @@ const RESTART_DISCONNECT_GRACE_MS = 4_000;
  * pre-empts the provider's message in a photo finish.
  */
 const PROVIDER_TIMEOUT_GRACE_MS = 250;
+/** How long the browser may take to open and claim a device before the operation says it looks stuck. A slow device is not failed for it: only Cancel ends the wait. */
+export const ACQUIRE_STALL_MS = 10_000;
 /**
  * How late a countdown may fire (a throttled background tab, a page that was busy) before it is considered stale and
  * nothing is sent. A page that slept through its countdown must not send a command the person was waiting to time.
@@ -253,8 +295,16 @@ interface OperationRecord {
   riskDeclared: boolean;
   /** True once the operation may touch the device: the person's trust covers it, or it needs none. */
   cleared: boolean;
-  /** Why the system (not the person or the agent) cancelled this: shown instead of a bare "cancelled". */
-  cancelReason?: string;
+  /** Who asked this to stop, and when. The first request is kept. A stop the system made also becomes the cancelled operation's `error`. */
+  cancellation?: OperationCancellation;
+  /** What the operation is doing or waiting for; cleared when it ends. */
+  stage?: OperationStage;
+  /** The page's id (see `OperationLease.host`). */
+  host: string;
+  /** The attempt to take the device's connection that the operation is in, or was last in. */
+  attempt?: LeaseAttempt;
+  /** What went over every connection the operation held; a shared ADB connection has one counter for all its operations. */
+  counters: SentCounter[];
   result?: HardwareResult;
   error?: string;
   output: OperationOutput[];
@@ -318,6 +368,7 @@ function cloneEvent(event: OperationEvent): OperationEvent {
 
 function frozenSnapshot(record: OperationRecord): DeviceOperationSnapshot {
   const request = cloneRequest(record.request);
+  const lease = leaseEvidence(record);
   const snapshot: DeviceOperationSnapshot = {
     id: record.id,
     sessionId: record.sessionId,
@@ -331,6 +382,9 @@ function frozenSnapshot(record: OperationRecord): DeviceOperationSnapshot {
     riskDeclared: record.riskDeclared ? true : undefined,
     result: record.result ? cloneResult(record.result) : undefined,
     error: record.error,
+    ...(record.cancellation ? { cancellation: { ...record.cancellation } } : {}),
+    ...(record.stage ? { stage: { ...record.stage } } : {}),
+    ...(lease ? { lease } : {}),
     output: Object.freeze(record.output.map(cloneOutput)),
     events: Object.freeze(record.events.map(cloneEvent)),
   };
@@ -339,6 +393,124 @@ function frozenSnapshot(record: OperationRecord): DeviceOperationSnapshot {
 
 function isTerminal(state: OperationState): boolean {
   return state === "succeeded" || state === "failed" || state === "cancelled";
+}
+
+/** The `error` a cancelled operation carries: the reason for a stop the system made. A person's or the agent's cancel carries none. */
+function cancelError(record: OperationRecord): string | undefined {
+  const { cancellation } = record;
+  return cancellation && isSystemCancel(cancellation.source) ? cancellation.reason : undefined;
+}
+
+/**
+ * One attempt to take a device's connection from the provider. The manager races every attempt against Cancel itself, so a provider
+ * whose native open or claim never returns cannot keep an operation "cancelling": the operation ends, and the attempt stays
+ * quarantined until the provider's own promise settles. Whatever it produces after that is released unused.
+ */
+interface LeaseAttempt {
+  /** The page's count of attempts; never reused. */
+  generation: number;
+  /** The operation that began it. */
+  operationId: string;
+  deviceId: string;
+  state: OperationLeaseState;
+  /** When `state` last changed. */
+  since: number;
+  step?: string;
+  nativeGeneration?: number;
+  stalled: boolean;
+  /** The provider's acquisition promise has settled. */
+  settled: boolean;
+  /** Tells the provider nobody wants the connection. */
+  controller: AbortController;
+  stallTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** What one connection's transport was asked to carry. */
+interface SentCounter {
+  shared: boolean;
+  confirmed: { requests: number; bytes: number };
+  failed: { requests: number; bytes: number };
+  inFlight: { requests: number; bytes: number };
+  /** The protocol took the serial port itself, so its writes are not seen here. */
+  incomplete: boolean;
+}
+
+function newCounter(shared: boolean): SentCounter {
+  return { shared, confirmed: { requests: 0, bytes: 0 }, failed: { requests: 0, bytes: 0 }, inFlight: { requests: 0, bytes: 0 }, incomplete: false };
+}
+
+/** Count explicit outgoing requests, including USB control commands whose data travels back to the page. */
+const COUNTED_CALLS: Record<string, true> = { write: true, controlOut: true, controlIn: true, reset: true, setSignals: true, setBaudRate: true };
+
+/**
+ * The transport as the protocol sees it, counting what it is asked to carry: a request is confirmed when its call returns, and
+ * "unconfirmed" while it runs or after it failed, because a call that failed may still have reached the device. One wrapper
+ * serves every operation that shares a connection, so the identity the protocols key their sessions on is the same for all of them.
+ */
+function countingTransport(transport: HardwareTransport, counter: SentCounter): HardwareTransport {
+  return new Proxy(transport, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      // esptool can write straight to the serial port, outside these counts.
+      if (property === "serialPort" && value) counter.incomplete = true;
+      if (typeof property !== "string" || typeof value !== "function" || COUNTED_CALLS[property] !== true) return value;
+      return (...args: unknown[]): unknown => {
+        // The data a request carries: write(bytes) and controlOut(setup, bytes). The other counted calls carry none.
+        const payload = property === "write" ? args[0] : property === "controlOut" ? args[1] : undefined;
+        const bytes = payload instanceof Uint8Array ? payload.byteLength : 0;
+        const finish = (outcome: "confirmed" | "failed"): void => {
+          counter.inFlight.requests -= 1;
+          counter.inFlight.bytes -= bytes;
+          counter[outcome].requests += 1;
+          counter[outcome].bytes += bytes;
+        };
+        counter.inFlight.requests += 1;
+        counter.inFlight.bytes += bytes;
+        let pending: unknown;
+        try {
+          pending = value.apply(target, args);
+        } catch (error) {
+          finish("failed");
+          throw error;
+        }
+        return Promise.resolve(pending).then(
+          (result) => { finish("confirmed"); return result; },
+          (error: unknown) => { finish("failed"); throw error; },
+        );
+      };
+    },
+  });
+}
+
+function sentEvidence(counters: readonly SentCounter[]): OperationSent | undefined {
+  if (counters.length === 0) return undefined;
+  const sent: OperationSent = { confirmed: { requests: 0, bytes: 0 }, unconfirmed: { requests: 0, bytes: 0 } };
+  for (const counter of counters) {
+    sent.confirmed.requests += counter.confirmed.requests;
+    sent.confirmed.bytes += counter.confirmed.bytes;
+    sent.unconfirmed.requests += counter.failed.requests + counter.inFlight.requests;
+    sent.unconfirmed.bytes += counter.failed.bytes + counter.inFlight.bytes;
+    if (counter.incomplete) sent.incomplete = true;
+    if (counter.shared) sent.shared = true;
+  }
+  return sent;
+}
+
+function leaseEvidence(record: OperationRecord): OperationLease | undefined {
+  const { attempt } = record;
+  if (!attempt) return undefined;
+  const sent = sentEvidence(record.counters);
+  return {
+    generation: attempt.generation,
+    host: record.host,
+    state: attempt.state,
+    since: attempt.since,
+    at: Date.now(),
+    ...(attempt.step === undefined ? {} : { step: attempt.step }),
+    ...(attempt.nativeGeneration === undefined ? {} : { nativeGeneration: attempt.nativeGeneration }),
+    ...(attempt.stalled ? { stalled: true as const } : {}),
+    ...(sent ? { sent } : {}),
+  };
 }
 
 function validFiniteInteger(value: number | undefined, name: string, minimum = 0): void {
@@ -387,6 +559,11 @@ interface SharedAdbLease {
   options: { interfaceNumber?: number; alternateSetting?: number };
   pending: Promise<HardwareTransportLease>;
   closing?: Promise<void>;
+  /** The attempt that opens it, and the counter every operation on this connection shares. */
+  attempt: LeaseAttempt;
+  counter: SentCounter;
+  /** The operations still waiting for `pending`. When the last one stops waiting the claim is abandoned and no new operation joins it. */
+  waiting: Set<string>;
 }
 
 /** ADB work that only opens more streams on the already authenticated connection. */
@@ -444,10 +621,6 @@ function randomId(prefix: string): string {
 
 async function sha256(blob: Blob): Promise<string> { return hashBlob(blob); }
 
-function isAbort(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -459,10 +632,11 @@ class LeaseDeadlineError extends Error {}
 /**
  * Waits for a lease acquisition, but not past `deadline` (an absolute time, when there is
  * one) and not past a cancel: a provider that is slow to open the device (WebUSB open,
- * configure, claim) must not keep a bounded wait, or a Cancel, waiting. An acquisition left
+ * configure, claim) must not keep a bounded wait, or a Cancel, waiting. `onGiveUp` runs first
+ * when the wait ends this way (that is where the attempt is quarantined). An acquisition left
  * behind this way does not leak: should it ever produce a lease, that lease is released at once.
  */
-function awaitLease(acquisition: Promise<HardwareTransportLease>, signal: AbortSignal, deadline: number | undefined, whenLate: string): Promise<HardwareTransportLease> {
+function awaitLease(acquisition: Promise<HardwareTransportLease>, signal: AbortSignal, deadline: number | undefined, whenLate: string, onGiveUp: () => void): Promise<HardwareTransportLease> {
   const { promise, resolve, reject } = Promise.withResolvers<HardwareTransportLease>();
   let settled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -474,10 +648,10 @@ function awaitLease(acquisition: Promise<HardwareTransportLease>, signal: AbortS
     done();
     return true;
   };
-  const onAbort = (): void => { finish(() => reject(new DOMException("Operation cancelled.", "AbortError"))); };
+  const onAbort = (): void => { finish(() => { onGiveUp(); reject(new DOMException("Operation cancelled.", "AbortError")); }); };
   if (signal.aborted) onAbort();
   else signal.addEventListener("abort", onAbort, { once: true });
-  if (!settled && deadline !== undefined) timer = setTimeout(() => { finish(() => reject(new LeaseDeadlineError(whenLate))); }, Math.max(0, deadline - Date.now()));
+  if (!settled && deadline !== undefined) timer = setTimeout(() => { finish(() => { onGiveUp(); reject(new LeaseDeadlineError(whenLate)); }); }, Math.max(0, deadline - Date.now()));
   acquisition.then(
     (lease) => { if (!finish(() => resolve(lease))) void lease.release().catch(() => undefined); },
     (error: unknown) => { finish(() => reject(error)); },
@@ -509,6 +683,11 @@ export class DeviceOperationManager {
   private readonly unsubscribeTrustBook: () => void;
   /** The remembered keys as of the last change, to tell which one was just forgotten. */
   private knownTrustedKeys: Set<string>;
+  /** This page's id, put in the evidence of every connection attempt: it changes when the page reloads, so evidence from two pages is never mistaken for one. */
+  private readonly hostId = crypto.randomUUID();
+  private attemptCount = 0;
+  /** The attempts the provider has not finished: those being opened, and abandoned ones whose native call is still outstanding (quarantined). */
+  private readonly attempts = new Set<LeaseAttempt>();
 
   /**
    * The browser reports that the device left the USB bus, or the user
@@ -536,7 +715,7 @@ export class DeviceOperationManager {
         }
         continue;
       }
-      if (!isTerminal(record.state)) this.cancel(record.id, this.departureReason(record, cause));
+      if (!isTerminal(record.state)) this.cancel(record.id, { source: cause === "forgotten" ? "device-forgotten" : "device-left", reason: this.departureReason(record, cause) });
       if (record.settled) settling.push(record.settled);
     }
     this.notifyTrust();
@@ -600,42 +779,94 @@ export class DeviceOperationManager {
    * `adb` commands share one connection on a PC. The device is released only
    * when the last of them finishes; anything that rewrites the connection or
    * the device (push staging, sideload, reboot) still needs the lease alone.
+   *
+   * Every way of waiting for a lease ends with Cancel (and with `deadline`, when there is one): see `awaitLease`.
    */
-  private async acquireLease(record: OperationRecord): Promise<HardwareTransportLease> {
+  private acquireLease(record: OperationRecord, deadline?: number, whenLate = "its USB connection was still being opened when it stopped waiting"): Promise<HardwareTransportLease> {
+    if (record.controller.signal.aborted) return Promise.reject(new DOMException("Operation cancelled.", "AbortError"));
     const { request } = record;
     const options = { interfaceNumber: request.interfaceNumber, alternateSetting: request.alternateSetting, ...(request.protocol === "fastboot" ? { pinConnection: true } : {}) };
-    if (!sharesAdbConnection(request)) return this.transportProvider.borrowHardwareTransport(request.deviceId, options);
-    const deviceId = request.deviceId;
+    return sharesAdbConnection(request) ? this.joinSharedAdb(record, options, deadline, whenLate) : this.borrowOwn(record, options, deadline, whenLate);
+  }
+
+  /** A connection of the operation's own. */
+  private async borrowOwn(record: OperationRecord, options: HardwareBorrowOptions, deadline: number | undefined, whenLate: string): Promise<HardwareTransportLease> {
+    const attempt = this.openAttempt(record);
+    const counter = newCounter(false);
+    const acquisition = this.provide(attempt, counter, (signal, onProgress) => this.transportProvider.borrowHardwareTransport(record.request.deviceId, { ...options, signal, onProgress }));
+    const lease = await awaitLease(acquisition, record.controller.signal, deadline, whenLate, () => this.abandonAttempt(record, attempt));
+    this.holdAttempt(record, attempt, counter);
+    return lease;
+  }
+
+  /**
+   * A connection several ADB operations share. The one that finds none opens it; the others wait for the same open. Each of them
+   * stops waiting on its own Cancel, and when the last one has, the open is abandoned: it is detached from the device, so the next
+   * operation asks the provider afresh (and is told what the provider says) instead of joining a claim that may never finish.
+   */
+  private async joinSharedAdb(record: OperationRecord, options: HardwareBorrowOptions, deadline: number | undefined, whenLate: string): Promise<HardwareTransportLease> {
+    const deviceId = record.request.deviceId;
     let shared = this.sharedAdb.get(deviceId);
     while (shared?.closing) {
-      await shared.closing.catch(() => undefined);
+      record.attempt = shared.attempt;
+      this.setStage(record, "acquiring", { waitingFor: "operation", operationId: shared.attempt.operationId });
+      this.emit(record, { type: "state", state: record.state });
+      await abortable(shared.closing.catch(() => undefined), record.controller.signal);
       shared = this.sharedAdb.get(deviceId);
     }
+    if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+    this.setStage(record, "acquiring", { waitingFor: "browser" });
     if (shared && (shared.options.interfaceNumber !== options.interfaceNumber || shared.options.alternateSetting !== options.alternateSetting)) {
-      return this.transportProvider.borrowHardwareTransport(deviceId, options);
+      return this.borrowOwn(record, options, deadline, whenLate);
     }
     if (!shared) {
-      const created: SharedAdbLease = { users: 0, options, pending: this.transportProvider.borrowHardwareTransport(deviceId, options) };
+      const attempt = this.openAttempt(record);
+      const counter = newCounter(true);
+      const created: SharedAdbLease = {
+        users: 0,
+        options,
+        attempt,
+        counter,
+        waiting: new Set(),
+        pending: this.provide(attempt, counter, (signal, onProgress) => this.transportProvider.borrowHardwareTransport(deviceId, { ...options, signal, onProgress })),
+      };
       shared = created;
       this.sharedAdb.set(deviceId, created);
       created.pending.catch(() => {
         if (this.sharedAdb.get(deviceId) === created && created.users === 0) this.sharedAdb.delete(deviceId);
       });
+    } else if (!shared.attempt.settled) {
+      record.attempt = shared.attempt;
+      this.setStage(record, "acquiring", { waitingFor: "operation", operationId: shared.attempt.operationId });
+      this.emit(record, { type: "state", state: record.state });
     }
     const entry = shared;
     entry.users += 1;
-    let base: HardwareTransportLease;
+    entry.waiting.add(record.id);
+    const joined = entry.pending.then(
+      (base) => this.sharedLease(entry, deviceId, base),
+      (error: unknown) => {
+        entry.users -= 1;
+        if (entry.users === 0 && this.sharedAdb.get(deviceId) === entry) this.sharedAdb.delete(deviceId);
+        throw error;
+      },
+    );
     try {
-      base = await entry.pending;
-    } catch (error) {
-      entry.users -= 1;
-      if (entry.users === 0 && this.sharedAdb.get(deviceId) === entry) this.sharedAdb.delete(deviceId);
-      throw error;
+      const lease = await awaitLease(joined, record.controller.signal, deadline, whenLate, () => this.giveUpShared(record, entry));
+      this.holdAttempt(record, entry.attempt, entry.counter);
+      return lease;
+    } finally {
+      entry.waiting.delete(record.id);
     }
+  }
+
+  /** One operation's handle on a shared ADB connection: the connection closes when the last handle is released. */
+  private sharedLease(entry: SharedAdbLease, deviceId: string, base: HardwareTransportLease): HardwareTransportLease {
     let released = false;
     return {
       transport: base.transport,
       identity: base.identity,
+      ...(base.generation === undefined ? {} : { generation: base.generation }),
       release: async () => {
         if (released) return;
         released = true;
@@ -649,6 +880,177 @@ export class DeviceOperationManager {
         }
       },
     };
+  }
+
+  /** An operation stops waiting for a shared connection to open. When none is left the claim is abandoned and detached from the device. */
+  private giveUpShared(record: OperationRecord, entry: SharedAdbLease): void {
+    entry.waiting.delete(record.id);
+    if (entry.waiting.size > 0 || entry.attempt.settled) return;
+    if (this.sharedAdb.get(record.request.deviceId) === entry) this.sharedAdb.delete(record.request.deviceId);
+    this.abandonAttempt(record, entry.attempt);
+  }
+
+  /** Count requests on the returned connection; update the attempt only after the provider settles or the lease is actually released. */
+  private provide(
+    attempt: LeaseAttempt,
+    counter: SentCounter,
+    start: (signal: AbortSignal, onProgress: (progress: HardwareAcquisitionProgress) => void) => Promise<HardwareTransportLease>,
+  ): Promise<HardwareTransportLease> {
+    const onProgress = (progress: HardwareAcquisitionProgress): void => {
+      if (attempt.state !== "acquiring" || (attempt.step === progress.step && attempt.nativeGeneration === progress.generation)) return;
+      attempt.step = progress.step;
+      if (progress.generation !== undefined) attempt.nativeGeneration = progress.generation;
+      for (const record of this.records.values()) {
+        if (record.attempt === attempt && record.stage?.name === "acquiring" && !record.controller.signal.aborted) {
+          this.emit(record, { type: "state", state: record.state });
+        }
+      }
+    };
+    // Let callers install their abort listeners before the provider can report its first step.
+    const started = Promise.resolve().then(() => {
+      if (attempt.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+      return start(attempt.controller.signal, onProgress);
+    });
+    return started.then(
+      (lease): HardwareTransportLease => {
+        if (lease.generation !== undefined) attempt.nativeGeneration = lease.generation;
+        this.attemptEnded(attempt, "lease");
+        return {
+          transport: countingTransport(lease.transport, counter),
+          identity: lease.identity,
+          ...(lease.generation === undefined ? {} : { generation: lease.generation }),
+          release: async () => {
+            await lease.release();
+            this.releasedAttempt(attempt);
+          },
+        };
+      },
+      (error: unknown) => {
+        const cleanup = isRecord(error) && error.usbCleanup instanceof Promise ? error.usbCleanup : undefined;
+        this.attemptEnded(attempt, "error", cleanup);
+        throw this.explainRefusal(attempt, error);
+      },
+    );
+  }
+
+  private openAttempt(record: OperationRecord): LeaseAttempt {
+    const attempt: LeaseAttempt = {
+      generation: ++this.attemptCount,
+      operationId: record.id,
+      deviceId: record.request.deviceId,
+      state: "acquiring",
+      since: Date.now(),
+      stalled: false,
+      settled: false,
+      controller: new AbortController(),
+    };
+    const timer = setTimeout(() => this.attemptStalled(attempt), ACQUIRE_STALL_MS);
+    // An open that never returns must not keep a Node process (a test run) alive for the stall time.
+    timer.unref?.();
+    attempt.stallTimer = timer;
+    this.attempts.add(attempt);
+    record.attempt = attempt;
+    return attempt;
+  }
+
+  /** The browser has taken long enough over an open that it is told apart from a queue: the operations waiting on it say so. */
+  private attemptStalled(attempt: LeaseAttempt): void {
+    attempt.stallTimer = undefined;
+    if (attempt.settled || attempt.state !== "acquiring") return;
+    attempt.stalled = true;
+    for (const record of this.records.values()) {
+      if (record.attempt !== attempt || isTerminal(record.state)) continue;
+      this.addOutput(record, `The browser has not finished opening the device after ${ACQUIRE_STALL_MS / 1000} s${attempt.step ? ` (last step: ${attempt.step})` : ""}. This looks stuck. Cancel stops waiting without waiting for the browser.`);
+      this.emit(record, { type: "state", state: record.state });
+    }
+  }
+
+  /** The operation took the connection `attempt` opened. */
+  private holdAttempt(record: OperationRecord, attempt: LeaseAttempt, counter: SentCounter): void {
+    record.attempt = attempt;
+    record.counters.push(counter);
+    if (attempt.state === "acquiring") {
+      attempt.state = "held";
+      attempt.since = Date.now();
+    }
+  }
+
+  /**
+   * The operation stops waiting for `attempt`. The provider is told nobody wants the connection, and the attempt is quarantined: the
+   * device stays reserved by the provider until its native call ends, and nothing here uses whatever that call produces.
+   */
+  private abandonAttempt(record: OperationRecord, attempt: LeaseAttempt): void {
+    // An attempt whose answer has come is not abandoned: a lease it produced is released unused by `awaitLease`.
+    if (attempt.settled || attempt.state !== "acquiring") return;
+    clearTimeout(attempt.stallTimer);
+    attempt.state = "quarantined";
+    attempt.since = Date.now();
+    attempt.controller.abort(record.cancellation?.reason ?? "The operation's time to wait ended.");
+    this.addOutput(record, `Stopped waiting for the browser to open the device${attempt.step ? ` (last step: ${attempt.step})` : ""}. Any late connection is released unused.`);
+  }
+
+  /** A provider can reject before the native reservation is free; the operation receives the error without waiting for cleanup. */
+  private attemptEnded(attempt: LeaseAttempt, outcome: "lease" | "error", cleanup?: Promise<void>): void {
+    attempt.settled = true;
+    clearTimeout(attempt.stallTimer);
+    if (cleanup) {
+      if (attempt.state === "acquiring") {
+        attempt.state = "quarantined";
+        attempt.since = Date.now();
+      }
+      void cleanup.then(() => this.attemptEnded(attempt, "error"), () => {
+        // A cleanup that failed is not evidence that the old reservation is free.
+      });
+      return;
+    }
+    if (outcome === "lease") {
+      // An abandoned attempt stays quarantined until the lease it produced has been given back: see `releasedAttempt`.
+      if (attempt.state !== "quarantined") this.attempts.delete(attempt);
+      return;
+    }
+    this.attempts.delete(attempt);
+    const abandoned = attempt.state === "quarantined";
+    if (!abandoned && attempt.state !== "acquiring") return;
+    attempt.state = "failed";
+    attempt.since = Date.now();
+    if (abandoned) this.noteAttempt(attempt, "The abandoned attempt to open the device has ended.");
+  }
+
+  /** The connection `attempt` opened was given back by its operation, or returned unused when no operation was still waiting. */
+  private releasedAttempt(attempt: LeaseAttempt): void {
+    if (attempt.state !== "held" && attempt.state !== "acquiring" && attempt.state !== "quarantined") return;
+    const unused = attempt.state === "quarantined";
+    attempt.state = "released";
+    attempt.since = Date.now();
+    this.attempts.delete(attempt);
+    if (unused) this.noteAttempt(attempt, "The connection that arrived after the operation stopped was given back unused; nothing was sent over it.");
+  }
+
+  private noteAttempt(attempt: LeaseAttempt, message: string): void {
+    for (const record of this.records.values()) {
+      if (record.attempt === attempt) this.addOutput(record, message);
+    }
+  }
+
+  /**
+   * A refusal that comes while an earlier claim by this page on the same device is still unanswered says which operation left it,
+   * when, and the way out. A provider that explains its own refusal (it carries `busy`, as the browser's lease book does) is left alone.
+   */
+  private explainRefusal(attempt: LeaseAttempt, error: unknown): unknown {
+    if (error instanceof UsbInterfaceClaimError || (isRecord(error) && (error.name === "AbortError" || isRecord(error.busy)))) return error;
+    for (const outstanding of this.attempts) {
+      if (outstanding === attempt || outstanding.deviceId !== attempt.deviceId || outstanding.state !== "quarantined") continue;
+      if (attempt.nativeGeneration !== undefined && outstanding.nativeGeneration !== undefined && attempt.nativeGeneration !== outstanding.nativeGeneration) continue;
+      return new Error(`${errorMessage(error)} Operation ${outstanding.operationId} stopped waiting for the browser to open this device at ${isoTime(outstanding.since)}${outstanding.step ? ` (last step: ${outstanding.step})` : ""}, and the browser has not confirmed cleanup. ${STUCK_CLAIM_RECOVERY}`);
+    }
+    return error;
+  }
+
+  /** Records what the operation is doing or waiting for. The next event published carries it; nothing is announced here. */
+  private setStage(record: OperationRecord, name: OperationStageName, wait: Pick<OperationStage, "waitingFor" | "operationId"> = {}): void {
+    const current = record.stage;
+    if (current && current.name === name && current.waitingFor === wait.waitingFor && current.operationId === wait.operationId) return;
+    record.stage = { name, since: Date.now(), ...wait };
   }
 
   registerFlasher(flasher: Flasher): void {
@@ -693,6 +1095,9 @@ export class DeviceOperationManager {
       writeGeneration: 0,
       riskDeclared: false,
       cleared: false,
+      host: this.hostId,
+      counters: [],
+      stage: { name: "preparing", since: now },
       ...(scheduled.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: scheduled.sendDelaySeconds }),
     };
     this.records.set(record.id, record);
@@ -718,25 +1123,32 @@ export class DeviceOperationManager {
     this.declined.clear();
     this.unsubscribeTrustBook();
     for (const record of this.records.values()) {
-      if (!isTerminal(record.state)) this.cancel(record.id, reason);
+      if (!isTerminal(record.state)) this.cancel(record.id, { source: "host-authority", reason });
     }
     this.notifyTrust();
   }
 
   /**
-   * Cancellation never queues an additional device write. `reason` is for a cancellation the system makes (a
-   * device left, authority moved): it is kept on the operation so the card says why instead of just "cancelled".
+   * Cancellation never queues an additional device write. The cause is recorded the moment the stop is asked for (who, when, and
+   * what the operation was doing), so a cancel that is still settling already says why. `reason` is for a stop the system makes
+   * (a device left, authority moved): it also becomes the cancelled operation's `error`, so the card says why instead of just "cancelled".
    */
-  cancel(id: string, reason?: string): DeviceOperationSnapshot {
+  cancel(id: string, cause: OperationCancelCause = { source: "user" }): DeviceOperationSnapshot {
     const record = this.requireRecord(id);
     if (isTerminal(record.state)) return frozenSnapshot(record);
     if (record.state !== "cancelling") {
-      if (reason) record.cancelReason ??= reason;
+      const now = Date.now();
+      record.cancellation = {
+        at: now,
+        source: cause.source,
+        reason: cause.reason ?? defaultCancelReason(cause.source),
+        ...(record.stage ? { stage: record.stage.name } : {}),
+      };
       record.state = "cancelling";
-      record.updatedAt = Date.now();
+      record.updatedAt = now;
       record.writeGeneration += 1;
-      record.controller.abort();
       record.countdown = undefined;
+      record.controller.abort();
       this.emit(record, { type: "state", state: record.state });
     }
     return frozenSnapshot(record);
@@ -904,6 +1316,7 @@ export class DeviceOperationManager {
      record.state = state;
      record.error = error;
      record.updatedAt = Date.now();
+     if (isTerminal(state)) record.stage = undefined;
      this.emit(record, { type: state === "succeeded" || state === "failed" || state === "cancelled" ? "completed" : "state", state, error });
     if (isTerminal(state)) this.pruneRecords();
    }
@@ -962,11 +1375,14 @@ export class DeviceOperationManager {
     for (;;) {
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       try {
-        return await awaitLease(this.acquireLease(record), record.controller.signal, deadline, "its USB connection was still being opened when the wait ended");
+        this.setStage(record, "acquiring", { waitingFor: "browser" });
+        return await this.acquireLease(record, deadline, "its USB connection was still being opened when the wait ended");
       } catch (error) {
         if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+        if (error instanceof UsbInterfaceClaimError) throw error;
         const remaining = deadline - Date.now();
         if (error instanceof LeaseDeadlineError || remaining <= 0) throw new Error(`The device did not become available within ${wait.timeoutMs / 1000} s: ${errorMessage(error)}`);
+        this.setStage(record, "acquiring", { waitingFor: "device" });
         if (!announced) {
           announced = true;
           this.reportProgress(record, { phase: "waiting", message: "Waiting for the device to appear." });
@@ -982,19 +1398,21 @@ export class DeviceOperationManager {
       await this.requireTrust(record);
       const input = await this.resolveInput(record);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+      this.setStage(record, "acquiring", { waitingFor: "browser" });
       this.reportProgress(record, { phase: "acquiring", message: "Acquiring exclusive hardware lease" });
       record.lease = await this.acquireLeaseForRun(record);
       record.identity = record.lease.identity;
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.state = "running";
+      this.setStage(record, "running");
       this.emit(record, { type: "state", state: record.state });
       const result = await this.runFlasher(record, record.lease.transport, input);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.result = cloneResult(result);
       completed = true;
     } catch (error) {
-      if (record.controller.signal.aborted || isAbort(error)) {
-        this.setState(record, "cancelled", record.cancelReason);
+      if (record.controller.signal.aborted) {
+        this.setState(record, "cancelled", cancelError(record));
       } else {
         this.setState(record, "failed", errorMessage(error));
       }
@@ -1013,7 +1431,7 @@ export class DeviceOperationManager {
         }
       }
     }
-    if (completed && record.controller.signal.aborted) this.setState(record, "cancelled", record.cancelReason);
+    if (completed && record.controller.signal.aborted) this.setState(record, "cancelled", cancelError(record));
     else if (completed && record.state === "running") this.setState(record, "succeeded");
   }
 
@@ -1123,26 +1541,31 @@ export class DeviceOperationManager {
     const previous = record.lease;
     record.lease = undefined;
     await previous?.release();
+    if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+    this.setStage(record, "acquiring", { waitingFor: "browser" });
     this.reportProgress(record, { phase: "reacquiring", message: "Reacquiring exclusive hardware lease" });
     const requested = {
       interfaceNumber: record.request.interfaceNumber,
       alternateSetting: record.request.alternateSetting,
     };
-    const acquisition = record.request.protocol === "adb"
+    const attempt = this.openAttempt(record);
+    const counter = newCounter(false);
+    const acquisition = this.provide(attempt, counter, (signal, onProgress) => record.request.protocol === "adb"
       ? reacquire!.call(this.transportProvider, record.request.deviceId, identity!, {
         ...requested,
-        signal: record.controller.signal,
+        signal,
+        onProgress,
         ...(options.deadline === undefined ? {} : { timeoutMs: Math.max(1, options.deadline - Date.now()) }),
       })
-      : this.transportProvider.borrowHardwareTransport(record.request.deviceId, requested);
+      : this.transportProvider.borrowHardwareTransport(record.request.deviceId, { ...requested, signal, onProgress }));
     // A provider's own limit does not cover opening the device, so the caller's deadline (and Cancel) is enforced here as a backstop.
-    const replacement = await awaitLease(acquisition, record.controller.signal, options.deadline === undefined ? undefined : options.deadline + PROVIDER_TIMEOUT_GRACE_MS, "the device was still being opened when the deadline passed");
-    if (record.controller.signal.aborted) {
-      await replacement.release();
-      throw new DOMException("Operation cancelled.", "AbortError");
-    }
+    const replacement = await awaitLease(acquisition, record.controller.signal, options.deadline === undefined ? undefined : options.deadline + PROVIDER_TIMEOUT_GRACE_MS, "the device was still being opened when the deadline passed", () => this.abandonAttempt(record, attempt));
+    this.holdAttempt(record, attempt, counter);
+    // If Cancel arrived as this resolved, let run() publish the stop before waiting for release.
     record.lease = replacement;
+    if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
     context.transport = replacement.transport;
+    this.setStage(record, "running");
     return replacement.transport;
   }
 
@@ -1173,7 +1596,7 @@ export class DeviceOperationManager {
   private withdrawFrom(record: OperationRecord): void {
     if (record.state === "cancelling") return;
     this.addOutput(record, `${TRUST_WITHDRAWN_REASON} Anything already sent to the device cannot be undone.`);
-    this.cancel(record.id, TRUST_WITHDRAWN_REASON);
+    this.cancel(record.id, { source: "trust-withdrawn", reason: TRUST_WITHDRAWN_REASON });
   }
 
   /** Cancels the agent's operations that were already allowed to touch `deviceId`; those still waiting for an answer keep waiting. */
@@ -1252,6 +1675,7 @@ export class DeviceOperationManager {
     record.controller.signal.addEventListener("abort", cancelled, { once: true });
     open.waiters.add(waiter);
     open.request = { ...open.request, waiting: open.waiters.size };
+    this.setStage(record, "waiting-for-trust", { waitingFor: "person" });
     record.state = "awaiting-trust";
     record.updatedAt = Date.now();
     this.emit(record, { type: "state", state: record.state });
@@ -1263,6 +1687,7 @@ export class DeviceOperationManager {
     }
     if (record.state === "awaiting-trust") {
       record.state = "starting";
+      this.setStage(record, "preparing");
       record.updatedAt = Date.now();
       this.emit(record, { type: "state", state: record.state });
     }
@@ -1304,6 +1729,7 @@ export class DeviceOperationManager {
           ...(binding.action === "fastboot update partition" ? [`Source package: ${binding.length} bytes, SHA-256 ${binding.sha256}.`] : []),
         ].join("\n");
         this.addOutput(record, plan);
+        this.setStage(record, "approval", { waitingFor: "person" });
         this.reportProgress(record, {phase:"awaiting-flash-approval",message:`Waiting for approval in the device's browser: ${binding.target}.`});
         if (this.approveFastbootWrite(plan) !== true) throw new Error(`Write to ${binding.target} not approved in the device's browser. No image was sent to that partition.`);
         // Native dialogs suspend script. Give queued disconnect/cancel events a turn before inspecting the original lease.
@@ -1312,6 +1738,7 @@ export class DeviceOperationManager {
             (record.identity !== undefined && this.transportProvider.currentIdentity && this.transportProvider.currentIdentity(deviceId) !== record.identity)) {
           throw new Error("The granted device changed or disconnected during flash approval. The write was not sent.");
         }
+        this.setStage(record, "running");
       }
     }
     const seconds = record.sendDelaySeconds;
@@ -1330,6 +1757,7 @@ export class DeviceOperationManager {
     const startedAt = Date.now();
     const countdown: OperationCountdown = { startedAt, releaseAt: startedAt + seconds * 1000, binding: cloneRiskBinding(binding) };
     record.countdown = countdown;
+    this.setStage(record, "countdown", { waitingFor: "time" });
     record.state = "countdown";
     record.updatedAt = startedAt;
     this.emit(record, { type: "state", state: record.state });
@@ -1338,6 +1766,7 @@ export class DeviceOperationManager {
     const refusal = this.refuseRelease(record, countdown);
     record.countdown = undefined;
     if (refusal) throw new Error(refusal);
+    this.setStage(record, "running");
     record.state = "running";
     record.updatedAt = Date.now();
     this.emit(record, { type: "state", state: record.state });
@@ -1496,7 +1925,7 @@ export function createPageOperationDelegate(
     },
     async cancel(frame, bridge): Promise<void> {
       activeBridge = bridge;
-      manager.cancel(frame.operationId);
+      manager.cancel(frame.operationId, { source: "agent" });
     },
     async send(frame, bridge): Promise<void> {
       activeBridge = bridge;

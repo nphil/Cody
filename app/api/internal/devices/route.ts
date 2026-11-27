@@ -3,7 +3,8 @@ import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { verifyDisplayCapability } from "@/lib/display/capability";
 import { getDeviceBridge } from "@/lib/devices/bus";
 import { DEVICE_OPERATION_TOOLS } from "@/lib/devices/operation-tools";
-import { DEVICE_TOOLS, type DeviceToolContext } from "@/lib/devices/tools";
+import { DEVICE_TOOLS } from "@/lib/devices/tools";
+import { DEVICE_WIRELESS_TOOLS } from "@/lib/devices/wireless-tools";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 
@@ -53,26 +54,19 @@ export async function POST(request: Request) {
     return invalidResponse("tool is required");
   }
   const toolName = body.tool;
-  const tool = [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS].find((candidate) => candidate.name === toolName);
-  if (!tool) {
-    return invalidResponse("Unknown device tool");
-  }
-  const toolArgs: Record<string, unknown> = isRecord(body.arguments) ? body.arguments : {};
-
-  // The bridge is keyed by the verified capability's session id, never the
-  // request body's — the body already had to match it above, so
-  // capability.sid is the only session identity trusted past this point.
-  // getDeviceBridge creates the bridge on first touch (bus.ts), so a session
-  // whose browser has never attached still resolves to an empty, unattached
-  // one rather than a lookup failure.
-  const context: DeviceToolContext = {
-    bridge: getDeviceBridge(capability.sid),
-    cwd: getRpcSession(capability.sid)?.cwd,
-    sessionId: capability.sid,
-  };
-
+  const wirelessTool = DEVICE_WIRELESS_TOOLS.find((candidate) => candidate.name === toolName);
+  const toolArgs = isRecord(body.arguments) ? body.arguments : {};
   try {
-    const text = await tool.handler(toolArgs, context);
+    const cwd = getRpcSession(capability.sid)?.cwd;
+    // The verified capability chooses the chat. Wireless calls don't create
+    // a browser bridge and end when the MCP caller disconnects or cancels.
+    if (wirelessTool) {
+      const text = await wirelessTool.handler(toolArgs, { cwd, sessionId: capability.sid, signal: request.signal });
+      return NextResponse.json({ text }, { headers: NO_STORE });
+    }
+    const browserTool = [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS].find((candidate) => candidate.name === toolName);
+    if (!browserTool) return invalidResponse("Unknown device tool");
+    const text = await browserTool.handler(toolArgs, { bridge: getDeviceBridge(capability.sid), cwd, sessionId: capability.sid });
     return NextResponse.json({ text }, { headers: NO_STORE });
   } catch (error) {
     // The handler contract promises plain text, never a throw, but the

@@ -24,6 +24,10 @@ const { SetCard, CombineConfirm } = await jiti.import("./devices/ArtifactSetCard
 const { EdlBackupSets } = await jiti.import("./devices/EdlWorkflow.tsx");
 const { groupActivity, activityView } = await jiti.import("../lib/devices/activity-groups.ts");
 const { groupArtifactSets } = await jiti.import("../lib/devices/artifact-sets.ts");
+const { WirelessCard, RemoveConfirm, ForgetGuide } = await jiti.import("./devices/WirelessCard.tsx");
+const { WirelessRootRequests } = await jiti.import("./devices/WirelessRootRequests.tsx");
+const { WirelessShellOutput, WirelessShellReview } = await jiti.import("./devices/WirelessShell.tsx");
+const { states: wirelessStates, rootRequests: wirelessRootRequests, shellResult } = await import("./devices/wireless-fixtures.mjs");
 
 const MB = 1024 * 1024;
 const NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
@@ -70,6 +74,13 @@ function markup() {
     }),
     React.createElement(CombineConfirm, { files: 3, older: set, olderTitle: "L · Backup set", locale: "en", locked: false, onConfirm() {}, onKeep() {} }),
     React.createElement(EdlBackupSets, { manager: { startUser() {} }, sessionId: "s-edl", deviceId: "usb-1", operations: [partitionTable], input: undefined, onChooseFile() {}, defaultPicked: names.slice(0, 5).map((_, index) => `partition_with_a_rather_long_name_${index}`) }),
+    // Wireless ADB: every state of the card (the pair form with its two ports, a paired tablet, offline with the address form, pair again), the removal steps, and the commands waiting for a root approval.
+    ...Object.entries(wirelessStates).map(([name, state]) => React.createElement(WirelessCard, { key: name, wireless: state })),
+    React.createElement(RemoveConfirm, { locked: false, onKeep() {}, onRemove() {} }),
+    React.createElement(ForgetGuide, { name: "Cody on a rather long server name", onDone() {} }),
+    React.createElement(WirelessRootRequests, { requests: wirelessRootRequests, busy: false, onAnswer() {} }),
+    React.createElement(WirelessShellReview, { command: wirelessRootRequests[0].command, locked: false, onBack() {}, onRun() {} }),
+    React.createElement(WirelessShellOutput, { result: shellResult }),
   ));
 }
 

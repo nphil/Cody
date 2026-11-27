@@ -9,6 +9,65 @@
 #   docker run -p 30177:30177 \
 #     -v /path/to/appdata:/data -v /path/to/projects:/workspace cody:latest
 
+# Bookworm's adb predates Wireless debugging. Build the maintained AOSP host
+# with discovery and plaintext/reconnect disabled. This stage builds natively
+# for the image architecture, with no Android SDK, emulator, or Rust toolchain.
+FROM node:22-bookworm-slim AS adb-build
+ARG TARGETARCH
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils patch cmake ninja-build g++ ccache libgtest-dev \
+    pkg-config protobuf-compiler libprotobuf-dev libbrotli-dev liblz4-dev \
+    libpcre2-dev libzstd-dev zlib1g-dev \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /adb
+COPY docker/adb-wireless.patch ./
+RUN curl -fsSL --retry 3 \
+      https://github.com/nmeum/android-tools/releases/download/37.0.0p1/android-tools-37.0.0p1.tar.xz \
+      -o source.tar.xz \
+  && echo '2c6de1abe16b211c7d9f59276217e14fd9e0e18b20e331d3c84358f5dffd576e  source.tar.xz' | sha256sum -c \
+  && tar -xJf source.tar.xz --strip-components=1 \
+  && patch --batch --fuzz=0 -p1 < adb-wireless.patch \
+  && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DANDROID_TOOLS_PATCH_VENDOR=OFF -DANDROID_TOOLS_USE_BUNDLED_FMT=ON \
+      -DANDROID_TOOLS_ADB_ENABLE_MDNS=OFF -DANDROID_TOOLS_USE_BUNDLED_LIBUSB=ON \
+      -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+RUN --mount=type=cache,id=cody-adb-ccache-${TARGETARCH},target=/root/.cache/ccache,sharing=locked \
+  CCACHE_MAXSIZE=512M cmake --build build --target adb --parallel 2 \
+  && strip build/vendor/adb build/vendor/libandroid_tools_libusb.so \
+  && mkdir -p /out \
+  && install -m 0755 build/vendor/adb /out/adb-wireless \
+  && install -m 0644 build/vendor/libandroid_tools_libusb.so /out/ \
+  && install -m 0644 vendor/libusb/COPYING /out/libusb-LICENSE \
+  && install -m 0644 vendor/adb/NOTICE /out/ADB-NOTICE \
+  && install -m 0644 vendor/boringssl/LICENSE /out/BoringSSL-LICENSE \
+  && install -m 0644 vendor/fmtlib/LICENSE /out/fmt-LICENSE
+
+# Link an isolated Android pairing endpoint against libraries already built.
+# It is mounted during the smoke test, never copied into the shipped image.
+FROM adb-build AS adb-proof
+RUN --mount=type=bind,source=docker/adb-wireless-pairing-peer.cpp,target=/tmp/adb-wireless-pairing-peer.cpp \
+  g++ -std=c++20 -O2 -pthread -Ivendor/adb/pairing_connection/include \
+    /tmp/adb-wireless-pairing-peer.cpp -o /out/adb-wireless-pairing-peer \
+    build/vendor/liblibadb.a build/vendor/liblibadb_tls_connection_defaults.a \
+    build/vendor/liblibbase.a build/vendor/libliblog.a build/vendor/fmtlib/libfmt.a \
+    build/vendor/boringssl/libssl.a build/vendor/boringssl/libcrypto.a -lprotobuf
+
+# Standalone smoke target reuses the native build layer; it does not build Cody.
+# These are the same binary and shared libraries that the final image uses.
+FROM node:22-bookworm-slim AS adb-runtime
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates libprotobuf32 libbrotli1 liblz4-1 libzstd1 zlib1g \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=adb-build /out/adb-wireless /out/libandroid_tools_libusb.so /usr/local/libexec/cody/
+COPY --from=adb-build /out/*LICENSE /out/ADB-NOTICE /usr/share/doc/cody-adb-wireless/
+RUN --network=none \
+  --mount=type=bind,source=docker/adb-wireless-smoke.mjs,target=/tmp/adb-wireless-smoke.mjs \
+  --mount=type=bind,from=adb-proof,source=/out/adb-wireless-pairing-peer,target=/tmp/adb-wireless-pairing-peer \
+  timeout 60s node /tmp/adb-wireless-smoke.mjs
+
 FROM node:22-bookworm AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -21,7 +80,7 @@ COPY . .
 # shipped it in every image as its single largest layer.
 RUN npm run build && npm prune --omit=dev && rm -rf .next/cache
 
-FROM node:22-bookworm-slim AS runtime
+FROM adb-runtime AS runtime
 
 # The container doubles as the dev box the agent works in, so it carries a
 # curated set of everyday tools on top of the slim Debian base (~120MB, plus

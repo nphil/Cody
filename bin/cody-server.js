@@ -15,6 +15,7 @@ const { isAuthRequired, resolveCredentials } = jiti("../lib/auth/guard.ts");
 const { canAccessDisplaySession } = jiti("../lib/display/access.ts");
 const { attachDisplaySocket, disposeDisplayProviders } = jiti("../lib/display/provider.ts");
 const { attachDeviceSocket } = jiti("../lib/devices/socket.ts");
+const { createWirelessOriginGate } = jiti("../lib/devices/wireless-origin.ts");
 const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib/display/native-gateway.ts");
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
 const { startEngineHousekeeping, stopEngineHousekeeping } = jiti("../lib/harness/housekeeping.ts");
@@ -77,6 +78,7 @@ function devicePath(url) { return new URL(url, "http://localhost").pathname === 
 
 async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  const markWirelessOrigin = createWirelessOriginGate();
   process.env.CODY_INTERNAL_DISPLAY_SECRET ||= randomBytes(32).toString("base64url");
   process.env.CODY_INTERNAL_DISPLAY_ORIGIN = `http://127.0.0.1:${options.port}`;
   process.env.CODY_PACKAGE_DIR ||= path.resolve(__dirname, "..");
@@ -90,10 +92,12 @@ async function main(argv = process.argv.slice(2)) {
   // is the largest thing that crosses, and the client chunks anything bigger.
   const deviceWs = new WebSocketServer({ noServer: true, maxPayload: 1_100_000 });
   const server = http.createServer((request, response) => {
+    markWirelessOrigin(request);
     if (!proxyNativeHttp(request, response)) handle(request, response);
   });
 
   server.on("upgrade", (request, socket, head) => {
+    markWirelessOrigin(request, true);
     if (proxyNativeUpgrade(request, socket, head)) return;
     if (displayPath(request.url || "")) {
       const credential = resolveCredentials(request.headers.cookie || null, request.headers.authorization || null);

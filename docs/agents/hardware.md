@@ -4,6 +4,7 @@
 
 Sections in this file:
 - Browser-hosted hardware (`lib/devices/`)
+  - Server-side wireless Android
   - Operations, artifacts, and progress
   - Device trust: one permission per device (`lib/devices/trust*.ts`)
   - Devices panel layout (connect -> device -> actions)
@@ -42,18 +43,54 @@ Fastboot `DATA` lengths are eight ASCII hex digits, optionally followed by one N
   which re-enumerates into another identity or mode needs a fresh user grant in
   the browser's picker, then a new operation (the agent is asked afresh unless
   the unit was remembered: same vendor id and serial number, see "Device
-  trust"). Do not retry or replay a write across
-  disconnect, cancellation, or mode change. Raw USB IN/control-IN calls are
-  bounded (five seconds by default); an expired connection is invalidated.
+  trust"). Do not retry or replay a write across disconnect, cancellation, or
+  mode change. Cancel or a deadline stops waiting for USB setup, not the
+  browser's native open or claim. The old handle stays reserved until the
+  browser answers and Cody closes it. A new handle can be used after
+  reconnect or regrant; if the picker returns the same object, Cody still
+  waits for that object's old claim to finish. A replacement device host
+  cancels its previous page's acquisitions and closes that page's idle raw
+  USB handles, not the new host's handles. Raw USB setup is bounded (15
+  seconds); raw USB IN/control-IN calls are bounded (five seconds by default)
+  and an expired connection is invalidated.
 - **Use the raw tools only for discovery or a protocol Cody does not implement.**
   `device_open`, `device_read`, `device_write`, `device_close`,
   `usb_transfer`, and `ble_gatt` are available after a grant. Opening USB
-  reports claimed interfaces, descriptors, and endpoints; a requested
-  unclaimable interface fails rather than becoming a partial success. On
-  Windows an interface held by another driver cannot be claimed; this is a host
-  driver issue, not a retryable device error. Do not hand-roll packet loops in
+  reports claimed interfaces, descriptors, and endpoints. With no named
+  interface or alternate, a failed interface's row keeps the browser's
+  original error while other interfaces can succeed. A named claim fails
+  with the browser's error, interface number and alternate where available,
+  and recovery steps. It is attempted once. Close competing Cody tabs or
+  programs on that computer, or check the Windows driver (WebUSB requires
+  WinUSB for that interface). If it remains stuck, unplug and reconnect or
+  use Disconnect in Devices and grant again. Do not hand-roll packet loops in
   `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, EDL, Gecko, STM32,
   or STK500).
+
+#### Server-side wireless Android
+
+Unlike USB, server-side wireless debugging continues after the browser closes.
+`device_list` shows only the tablet the owner selected for this chat, without
+showing its connection endpoint or devices from other chats. The omp tool
+list follows the selection, not the tablet's momentary online status. ACP
+uses the same tool handlers through the session-bound internal device route.
+
+- `wireless_inspect`, `wireless_logcat` and `wireless_files` perform bounded,
+  unprivileged diagnostics, log reads and shared-storage file work without
+  repeated approval. Workspace transfers stay inside the chat's working
+  directory, do not follow symlinks and never overwrite an existing file.
+  Pushes reserve the exact authorized connection before opening the local file
+  and never switch to a replacement connection. Pulls reserve capacity until
+  the workspace file has been saved or the unfinished download cleaned up.
+- `wireless_request_command` proposes one exact shell or root command. Only
+  the person in Devices can approve it, once. `wireless_command_status`
+  reports the decision and result; it cannot run or retry the command.
+  Magisk may separately ask on the tablet for permission for the Android
+  shell user. Use one-time permission, not “always allow”: Cody cannot
+  control other ADB clients or programs running as its own OS user.
+- There is no agent pairing, host ADB proxy or persistent root shell. Cody
+  does not replay interrupted writes or approved commands on reconnect.
+  If a result was lost, check what actually changed before trying again.
 
 #### Operations, artifacts, and progress
 
@@ -228,6 +265,23 @@ backups") is the session-level file library the action forms draw their input
 from. Operations appear in the card of the device they ran on; those of
 disconnected devices are listed in a closed disclosure at the bottom.
 
+`WirelessCard` is independent of the USB bridge. Use the connection port from
+Android's main Wireless debugging screen and the separate pairing port from
+its code popup. The masked code goes only in the pairing POST body and clears
+on submission. The form, status and root approvals reset when the chat changes.
+`WirelessRootRequests` shows the exact ordinary or root command above other
+activity; only the signed-in chat owner can approve it, once, for that chat.
+`WirelessShell` lets the owner review and confirm their own exact command;
+it starts with ordinary permissions but can request root and modify files.
+Commands, approvals, reconnect, disconnect and forget name the exact
+selection shown; a stale page cannot act on a replacement connection.
+Sensitive submissions require verified HTTPS or direct loopback. The custom
+launcher checks the actual socket peer, strips caller-supplied origin proof,
+and signs the expected origin for the wireless HTTP routes. A reverse proxy
+needs `CODY_PUBLIC_ORIGIN` and `CODY_TRUSTED_PROXY_IP`; see the README's
+Security notes for setup. Disconnect keeps the pairing and pauses automatic
+reconnect. Removing the pairing deletes Cody's key; remove Cody on Android too.
+
 `lib/devices/ui-model.ts` is the single table behind it: the mode from the USB
 descriptors (`deviceMode`), the protocols offered (`offeredProtocols`), the
 groups for those protocols (`availableGroups`) and which `(protocol, action)`
@@ -333,10 +387,39 @@ Caller options cannot supply authority, device geometry, or trust. Each structur
 An ACK, progress counter, CRC or successful command is never readback proof.
 A transport timeout is unknown completion, never permission to replay a write.
 
-Every system cancel records its reason (`cancel(id, reason)` -> `snapshot.error`),
-so the card and `device_operation_status` say why an operation ended: a tablet whose
-volume keys are held drops off the bus, `deviceDisconnected` cancels what waits
-on it, and the card would otherwise simply vanish.
+`device_operation_status` and the operation detail sheet report who asked for
+a stop, when, why, and what step was in progress. The first stop request wins
+and is visible even before cancellation finishes. A system stop also sets
+`snapshot.error` at completion. Page-side automatic stops come from a browser
+USB or serial disconnect (except an expected restart or `wait-for-device`),
+Disconnect in Devices, withdrawal of the agent's device trust, or the browser
+losing this session's hardware authority. Ending an agent turn or reconnecting
+its websocket does not cancel an operation.
+
+Status distinguishes opening the device from waiting on another ADB operation
+that is opening it. It identifies the browser page and each connection attempt
+(plus the native handle generation when available). Transport counts describe
+outgoing requests and their submitted bytes, including protocol commands and
+headers, not the size of a file or proof of a completed write. Rejected and
+unfinished requests are unconfirmed; shared ADB counts cover the connection,
+and raw serial writes via esptool cannot all be counted.
+
+Cancel ends the operation's wait without waiting for the browser's native USB
+open or claim. The old handle stays reserved while that step is unresolved.
+If the provider returns before that cleanup, its error carries `usbCleanup`;
+the operation can end, but its connection still shows as reserved until the
+promise reports cleanup.
+Any late lease is released unused, never handed to another operation; cleanup
+does not touch a newer grant. If the step does not finish, cancel, unplug and
+reconnect the device (or Disconnect in Devices and grant it again), and close
+anything else holding it. Reload Cody only if needed. Verify the device before
+trying a new write; Cody does not retry or replay a write on its own.
+
+On loss of the browser connection, the server waits for fresh status from
+the page that owns each unfinished operation. A new socket alone does not
+establish that an old operation is still running. Missing jobs become
+"completion is unknown"; a later real terminal result can correct that
+status. Reconnecting never resubmits a hardware command.
 
 Protocols with intrinsic erase geometry preserve and verify their whole erase
 footprint. Fastboot addresses named partitions: when fetch is available it
@@ -345,6 +428,22 @@ sparse DONT_CARE bytes and bytes beyond the image are explicitly unverified.
 Without fetch, boot recovery and use ADB device_verify with the raw image's
 exact target path, byte length, and SHA-256. Sparse file hashes cannot be used
 as expanded-image hashes.
+
+#### Server-side wireless ADB trust boundary
+
+Android's code-based pairing authorizes a **server identity**, not the
+browser USB grant. Bind it to the signed-in owner and one session; never
+transfer it to a fork, another account or an unowned chat. A pairing code
+belongs only in the private form and the pairing protocol, never tool
+arguments, logs, process arguments, storage or URLs. Forget removes Cody's
+key; Android has its own **Forget** control. An agent cannot turn a request
+for elevation into approval. Interrupted commands are never sent again.
+
+Pair on a trusted network. Android authenticates the host key; matching the
+paired device GUID is a consistency check, not cryptographic authentication
+of the tablet to the host. Cody's session and approval controls apply to
+its device integration; they are not an OS sandbox against a process with
+the server user's file and process privileges.
 
 #### Supported protocol boundaries
 
@@ -516,17 +615,24 @@ as expanded-image hashes.
   (`DeviceOperationManager.departureExpected`: an announced restart window OR a
   `record.waitDeadline` still ahead; the connection's trust still ends with the departure, only the
   same granted identity is ever taken again, and `disconnectDevice`'s
-  `"forgotten"` still cancels). `awaitLease` (operations.ts) races every wait
-  acquisition and every reacquisition against the deadline and Cancel (a
-  reacquisition's backstop is `PROVIDER_TIMEOUT_GRACE_MS` later, so a provider's
-  own `timeoutMs` error wins a photo finish) and releases a lease that arrives
-  after the wait gave up; WebUSB open/configure/claim can take as long as it
-  likes. The server (`DeviceBridge.departedDevice`) remembers the ids of
+  `"forgotten"` still cancels). `awaitLease` (operations.ts) races ordinary
+  acquisition, a shared ADB connection opening, each `wait-for-device` poll,
+  and reacquisition against Cancel and any applicable deadline (a
+  reacquisition's backstop is `PROVIDER_TIMEOUT_GRACE_MS` later so the
+  provider's own timeout can finish first). A lease that arrives after a
+  waiter gave up is released unused. When all waiters on a shared opening
+  give up, new operations no longer wait on that opening. The provider reports
+  the native setup step and handle number through `onProgress`, stops starting
+  new setup steps when its `signal` aborts, and rejects promptly. `usbCleanup`
+  on an abandoned acquisition error resolves after that handle's late close;
+  the lease book keeps the handle reserved until then. A refused
+  `claimInterface` ends the wait or reconnect check without another claim.
+  The server (`DeviceBridge.departedDevice`) remembers the ids of
   devices that left the page (15 min, 16 at most, cleared when another page takes
   over, never for a roster drop) and `device_exec` accepts them for
   `wait-for-device` by exact id only. Call `reacquireHardwareTransport` on its
   provider (`.call`): the browser implementation uses `this`. Tests:
-  `adb-lifecycle.test.mjs` (manager level) and `adb-browser-lifecycle.test.mjs`,
+  `operation-cancellation.test.mjs`, `adb-lifecycle.test.mjs` (manager level), and `adb-browser-lifecycle.test.mjs`,
   which drives the real `DeviceBridgeConnection` with `fakeBrowser()` /
   `fakeUsbAdbDevice()` from `usb-adb.test-helper.mjs` (a `disconnect` event, then
   the device returning as a NEW USB object with the same vendor/product/serial;

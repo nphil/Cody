@@ -8,6 +8,8 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const { DEVICE_TRUST_NOTE, DEVICE_OPERATION_TOOLS } = await jiti.import("../lib/devices/operation-tools.ts");
+const { DEVICE_TOOLS } = await jiti.import("../lib/devices/tools.ts");
+const { DEVICE_WIRELESS_TOOLS } = await jiti.import("../lib/devices/wireless-tools.ts");
 const { SCHEDULE_TOOLS } = await jiti.import("../lib/scheduled/tools.ts");
 const { CHAT_MESSAGE_TOOLS } = await jiti.import("../lib/chat-messages/tools.ts");
 const { MODEL_SWITCH_TOOLS } = await jiti.import("../lib/model-switch/tool.ts");
@@ -49,6 +51,10 @@ async function withBridge(run, { scheduled = true, messaging = true, modelSwitch
         response.setHeader("content-type", "application/x-ndjson");
         response.write(`${JSON.stringify({ type: "progress", text: "Running on proxmox - 1 s" })}\n`);
         response.on("close", () => events.push("hung up"));
+        return;
+      }
+      if (request.url === "/devices" && body.tool === "wireless_logcat" && body.arguments?.tag === "CodyCancel") {
+        response.on("close", () => events.push("wireless request hung up"));
         return;
       }
       response.setHeader("content-type", "application/json");
@@ -132,6 +138,54 @@ test("device_install called through the MCP bridge reaches the device endpoint w
     const refused = await client.callTool({ name: "device_install", arguments: { ...args, sha256: "not-a-digest" } }).then((value) => value, (error) => error);
     assert.ok(refused instanceof Error || refused.isError === true, "the schema refuses a bad digest");
     assert.equal(calls.length, 1);
+  });
+});
+
+test("wireless tool descriptions and argument schemas match the host roster without an approval or pairing action", async () => {
+  await withBridge(async ({ client }) => {
+    const { tools } = await client.listTools();
+    const exposed = new Map(tools.filter((tool) => tool.name.startsWith("wireless_")).map((tool) => [tool.name, tool]));
+    assert.deepEqual([...exposed.keys()].sort(), DEVICE_WIRELESS_TOOLS.map((tool) => tool.name).sort());
+    assert.equal(tools.find((tool) => tool.name === "device_list").description, DEVICE_TOOLS.find((tool) => tool.name === "device_list").description);
+    for (const host of DEVICE_WIRELESS_TOOLS) {
+      const { description, inputSchema } = exposed.get(host.name);
+      assert.equal(description, host.description, `${host.name} description`);
+      assert.deepEqual([...(inputSchema.required ?? [])].sort(), [...host.parameters.required].sort(), `${host.name} required arguments`);
+      assert.deepEqual(Object.keys(inputSchema.properties).sort(), Object.keys(host.parameters.properties).sort(), `${host.name} arguments`);
+      for (const [name, spec] of Object.entries(host.parameters.properties)) {
+        for (const [field, value] of Object.entries(spec)) {
+          assert.deepEqual(inputSchema.properties[name][field], value, `${host.name}.${name} ${field}`);
+        }
+      }
+    }
+  });
+});
+
+test("a command approval request through MCP carries the exact command and bound chat, never a pairing or approval call", async () => {
+  await withBridge(async ({ client, calls, paths }) => {
+    const name = "wireless_request_command";
+    const args = { command: "id", elevated: true, reason: "Check which user Android is using" };
+    const sent = await client.callTool({ name, arguments: args });
+    assert.deepEqual(sent.content, [{ type: "text", text: `server accepted ${name}` }]);
+    const invalid = await client.callTool({ name, arguments: { command: "id" } }).then((value) => value, (error) => error);
+    assert.ok(invalid instanceof Error || invalid.isError === true, "elevation must be explicit");
+    assert.deepEqual(paths, ["/devices"]);
+    assert.deepEqual(calls, [{ authorization: "Bearer capability-token", body: { sessionId: "session-1", tool: name, arguments: args } }]);
+  });
+});
+
+test("cancelling a wireless log read over MCP aborts its request without repeating it", async () => {
+  await withBridge(async ({ client, calls, events }) => {
+    const stop = new AbortController();
+    const pending = client.callTool({ name: "wireless_logcat", arguments: { tag: "CodyCancel" } }, undefined, { signal: stop.signal })
+      .then((value) => value, (error) => error);
+    for (let i = 0; i < 100 && calls.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(calls.length, 1, "the log read started");
+    stop.abort();
+    await pending;
+    for (let i = 0; i < 100 && events.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(events, ["wireless request hung up"]);
+    assert.equal(calls.length, 1, "the bridge never repeats the request");
   });
 });
 

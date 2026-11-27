@@ -1,4 +1,5 @@
 import type { HardwareTransport } from "./flasher";
+import type { NativeCall } from "./usb-acquisition";
 
 /** CDC Union functional descriptors bind the control interface to data interfaces. */
 export function cdcUnionControl(bytes: Uint8Array, dataInterface: number): number {
@@ -15,7 +16,7 @@ export function cdcUnionControl(bytes: Uint8Array, dataInterface: number): numbe
   return [...matches][0]!;
 }
 
-export async function cdcControlInterface(device: USBDevice, dataInterface: number): Promise<number> {
+export async function cdcControlInterface(device: USBDevice, dataInterface: number, native: NativeCall): Promise<number> {
   const configuration = device.configuration;
   if (!configuration) throw new Error("CDC requires an active USB configuration.");
   const controls = configuration.interfaces.filter(iface => iface.alternates.some(alt => alt.interfaceClass === 2 && alt.interfaceSubclass === 2));
@@ -24,9 +25,9 @@ export async function cdcControlInterface(device: USBDevice, dataInterface: numb
   const index = device.configurations.findIndex(candidate => candidate.configurationValue === configuration.configurationValue);
   if (index < 0) throw new Error("Active CDC configuration is not listed by the device.");
   const setup: USBControlTransferParameters = { requestType: "standard", recipient: "device", request: 6, value: 0x200 | index, index: 0 };
-  const header = await device.controlTransferIn(setup, 9);
+  const header = await native("reading the CDC configuration header", () => device.controlTransferIn(setup, 9));
   if (header.status !== "ok" || !header.data || header.data.byteLength < 9) throw new Error("Could not read CDC configuration header.");
-  const result = await device.controlTransferIn(setup, header.data.getUint16(2, true));
+  const result = await native("reading the CDC configuration descriptors", () => device.controlTransferIn(setup, header.data!.getUint16(2, true)));
   if (result.status !== "ok" || !result.data) throw new Error("Could not read CDC configuration descriptors.");
   const control = cdcUnionControl(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength), dataInterface);
   if (!controls.some(iface => iface.interfaceNumber === control)) throw new Error("CDC Union names an interface which is not an ACM control interface.");

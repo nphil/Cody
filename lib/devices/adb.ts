@@ -16,6 +16,7 @@ import { hashFirmware, normalizeSha256, sha256Blob } from "./hardware-safety";
 import { sideloadAdb } from "./adb-sideload";
 import { openZip } from "./zip-archive";
 import { pause } from "./pause";
+import { UsbInterfaceClaimError } from "./usb-acquisition";
 
 const ADB_PACKET_READ_BYTES = 64 * 1024;
 const ADB_PROBE_READ_LIMIT_MS = 20_000;
@@ -1619,6 +1620,7 @@ async function reconnectAndRead<T>(context: HardwareContext, deadline: number, r
     } catch (error) {
       context.signal.throwIfAborted();
       last = error instanceof Error ? error.message : String(error);
+      if (error instanceof UsbInterfaceClaimError) return { failure: last };
     }
     await pause(Math.min(ADBD_RECONNECT_POLL_MS, Math.max(0, deadline - Date.now())), context.signal);
   }
@@ -1777,6 +1779,7 @@ async function waitForDevice(request: HardwareRequest, context: HardwareContext)
       leased = true;
     } catch (error) {
       context.signal.throwIfAborted();
+      if (error instanceof UsbInterfaceClaimError) throw error;
       leased = false;
       last = error instanceof Error ? error.message : String(error);
     }

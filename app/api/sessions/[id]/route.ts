@@ -26,6 +26,7 @@ import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } 
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession, removeDeletedSessionScratch } from "@/lib/rpc-manager";
 import { forgetSession } from "@/lib/auth/session-owners";
+import { forgetWirelessSession } from "@/lib/devices/wireless-service";
 import { getHarness } from "@/lib/harness";
 import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from "@/lib/harness/engine-sessions";
 import { forgetSessionLocalRouting } from "@/lib/local-model-routing";
@@ -397,6 +398,7 @@ export async function DELETE(
       const engine = resolveEngineSessionOr404(id, req);
       if ("response" in engine) return engine.response;
       await getRpcSession(id)?.destroyAndWait?.("the chat was deleted");
+      await forgetWirelessSession(id);
       removeEngineSession(id);
       forgetSession(id);
       forgetSessionLocalRouting(id);
@@ -544,6 +546,8 @@ async function deleteSessionAndRelink(id: string, filePath: string): Promise<Arr
   // Await the child's exit before unlinking: omp flushes session state on
   // shutdown and would recreate the file if it were still running.
   await getRpcSession(id)?.destroyAndWait?.("the chat was deleted");
+  const aliases = new Set([id, deletedSessionId]);
+  for (const alias of aliases) await forgetWirelessSession(alias);
   deleteSessionFileWithArtifacts(filePath);
   invalidateSessionPathCache(id);
   invalidateSessionListCache();
@@ -553,6 +557,6 @@ async function deleteSessionAndRelink(id: string, filePath: string): Promise<Arr
   forgetSessionToolsets(deletedSessionId);
   removeSessionItems(deletedSessionId);
   // Last, once the engine that was writing there is gone.
-  for (const alias of new Set([id, deletedSessionId])) await removeDeletedSessionScratch(alias);
+  for (const alias of aliases) await removeDeletedSessionScratch(alias);
   return skippedChildren;
 }

@@ -67,6 +67,8 @@ import { BROWSER_HOST_TOOLS, BROWSER_HOST_URI_SCHEMES, isBrowserHostTool } from 
 import { DeviceNoticeBatcher, deviceNoticeFrame, noticeForOperation, type DeviceNotice } from "./devices/operation-notices";
 import { DEVICE_TOOLS } from "./devices/tools";
 import { aliasDeviceBridge, getDeviceBridge } from "./devices/bus";
+import { wirelessService } from "./devices/wireless-service";
+import { DEVICE_WIRELESS_TOOLS, hasSelectedWirelessDevice } from "./devices/wireless-tools";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -459,6 +461,7 @@ const SERVER_HOST_TOOL_NAMES = new Set([
   ...SIDEBAR_CONTEXT_TOOLS.map((tool) => tool.name),
   ...DEVICE_TOOLS.map((tool) => tool.name),
   ...DEVICE_OPERATION_TOOLS.map((tool) => tool.name),
+  ...DEVICE_WIRELESS_TOOLS.map((tool) => tool.name),
 ]);
 /** The tools a MAIN chat's host-tool calls are settled with: the session three, the scheduling three, the two chat-messaging tools and switch_model share one handler contract. */
 const MAIN_SESSION_TOOLS = [...SESSION_AWARENESS_TOOLS, ...SCHEDULE_TOOLS, ...CHAT_MESSAGE_TOOLS, ...MODEL_SWITCH_TOOLS];
@@ -1314,6 +1317,9 @@ export class AgentSessionWrapper {
    *  the granted-device count, but lets go only after a grace period. */
   private workingDeviceToolsPublished = false;
   private deviceToolsReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  private wirelessWatch: (() => void) | null = null;
+  private wirelessToolsPublished = false;
+  private readonly pendingWirelessTools = new Map<string, AbortController>();
   /** The roster (and URI schemes) the current child last accepted. omp
    *  answers commands one at a time, and a tool-roster change is announced
    *  in the transcript, so an identical roster is never sent twice. */
@@ -1469,6 +1475,7 @@ export class AgentSessionWrapper {
     const published = this.workingDeviceToolsPublished
       ? [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS]
       : DEVICE_TOOLS.filter((tool) => tool.name === "device_list");
+    if (this.wirelessToolsPublished) published.push(...DEVICE_WIRELESS_TOOLS);
     return published.map(({ handler: _handler, ...tool }) => tool);
   }
 
@@ -1553,6 +1560,36 @@ export class AgentSessionWrapper {
         });
       }
     });
+  }
+
+  private watchWirelessTools(): void {
+    if (!this._sessionId || this.wirelessWatch || !this.engine.rpcUi.hostTools || this.engine.kind === "sidebar") return;
+    const sessionId = this._sessionId;
+    const changed = () => {
+      // Keep the roster steady across link drops and reconnects: it follows
+      // the person's selection, not whether the tablet is answering right now.
+      const selected = hasSelectedWirelessDevice(sessionId);
+      if (selected === this.wirelessToolsPublished || !this.isAlive()) return;
+      this.wirelessToolsPublished = selected;
+      void this.publishHostTools().catch(() => {});
+    };
+    this.wirelessWatch = wirelessService().subscribe(sessionId, changed);
+    changed();
+  }
+
+  private cancelWirelessTools(changingChat = false): void {
+    for (const [id, call] of this.pendingWirelessTools) {
+      if (call.signal.aborted) continue;
+      call.abort();
+      // The engine survives a chat id change and still needs a result.
+      if (changingChat) this.sendHostToolResult({
+        type: "host_tool_result",
+        id,
+        isError: true,
+        result: { content: [{ type: "text", text: "The chat changed. Check the tablet's state before retrying any change." }] },
+      });
+    }
+    this.pendingWirelessTools.clear();
   }
 
   /** The phase flags a status call reports, read straight off this wrapper.
@@ -1915,9 +1952,15 @@ export class AgentSessionWrapper {
       this.deviceWatch = null;
       this.operationWatch?.();
       this.operationWatch = null;
+      // Unlike the live browser bridge, a wireless grant stays with the chat
+      // explicitly selected by the person, even when this engine changes ids.
+      this.wirelessWatch?.();
+      this.wirelessWatch = null;
+      this.cancelWirelessTools(true);
     }
     this._sessionId = id;
     this.watchDeviceBridge();
+    this.watchWirelessTools();
   }
 
   private applyIdentity(state: RpcSessionState): void {
@@ -2353,6 +2396,11 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        const wireless = this.pendingWirelessTools.get(targetId);
+        if (wireless) {
+          wireless.abort();
+          return;
+        }
         if (targetId && this.pendingHostTools.delete(targetId)) {
           this.emit(event);
           notifyRunningChange();
@@ -2836,6 +2884,26 @@ export class AgentSessionWrapper {
         ...this.sessionToolContext(),
       });
       this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      return;
+    }
+    const wirelessTool = this.engine.kind === "sidebar" || this.localProfileLaunch?.profileId === "minimal"
+      ? undefined
+      : DEVICE_WIRELESS_TOOLS.find((tool) => tool.name === toolName);
+    if (wirelessTool) {
+      const call = new AbortController();
+      this.pendingWirelessTools.set(id, call);
+      try {
+        const text = await wirelessTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
+          cwd: this.cwd,
+          sessionId: this._sessionId,
+          signal: call.signal,
+        });
+        if (!call.signal.aborted) {
+          this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+        }
+      } finally {
+        if (this.pendingWirelessTools.get(id) === call) this.pendingWirelessTools.delete(id);
+      }
       return;
     }
     const deviceTool = this.engine.kind === "sidebar"
@@ -3434,6 +3502,7 @@ export class AgentSessionWrapper {
     const resumable = !!sessionFile && existsSync(sessionFile);
     const old = this.proc;
     this.restarting = true;
+    this.cancelWirelessTools();
     this.unsubscribeFrames?.();
     try {
       await old.dispose();
@@ -4534,6 +4603,9 @@ export class AgentSessionWrapper {
     this.deviceWatch = null;
     this.operationWatch?.();
     this.operationWatch = null;
+    this.wirelessWatch?.();
+    this.wirelessWatch = null;
+    this.cancelWirelessTools();
     this.deviceNotices.dispose();
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();

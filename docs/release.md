@@ -135,3 +135,8 @@ Then update the running server (Unraid's update button, or
 agents: if you are running inside that container, recreating it ends your
 session — finish everything else first, and never recreate it without the
 owner's say-so.
+
+When another chat reports a Cody defect, investigate and fix it as it comes in;
+batch related fixes into a tested release. Publishing that release does **not**
+authorize updating the owner's running Cody container. Wait for explicit
+permission for that update, even when no other chat appears active.

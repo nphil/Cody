@@ -1,0 +1,366 @@
+Cody-only AOSP host: explicit endpoint and private Unix server; no discovery,
+legacy ADB, or transport replay. Pairing PAKE and TLS 1.3 remain upstream.
+Applies to the pinned, prepatched android-tools 37.0.0p1 release archive.
+
+--- a/vendor/adb/adb.cpp
++++ b/vendor/adb/adb.cpp
+@@ -449,5 +449,4 @@
+ #if ADB_HOST
+         send_tls_request(t);
+-        adb_auth_tls_handshake(t);
+ #else
+         adbd_auth_tls_handshake(t);
+@@ -811,4 +810,6 @@
+ 
+ int launch_server(const std::string& socket_spec, const char* one_device) {
++    // Cody supervises its own private foreground server; never fork a replacement.
++    return -1;
+ #if defined(_WIN32)
+     /* we need to start the server in the background                    */
+--- a/vendor/adb/client/adb_wifi.cpp
++++ b/vendor/adb/client/adb_wifi.cpp
+@@ -17,4 +17,6 @@
+ #include "client/adb_wifi.h"
+ 
++#include <cstdlib>
++#include <cstring>
+ #include <fstream>
+ #include <random>
+@@ -178,4 +180,10 @@
+ void adb_wifi_pair_device(const std::string& host, const std::string& password,
+                           std::string& response) {
++    const char* selected = getenv("CODY_ADB_PAIR_ADDRESS");
++    if (!selected || host != selected) {
++        response = "Pairing address was not selected";
++        return;
++    }
++
+ #if ADB_MDNS
+     auto mdns_info = mdns_get_pairing_service_info(host);
+@@ -247,5 +255,11 @@
+     }
+ 
+-    std::string device_guid = reinterpret_cast<const char*>(waiter.peer_info_.data);
++    const char* data = reinterpret_cast<const char*>(waiter.peer_info_.data);
++    const size_t size = strnlen(data, sizeof(waiter.peer_info_.data));
++    if (size == 0 || size == sizeof(waiter.peer_info_.data)) {
++        response = "Failed: Invalid device GUID.";
++        return;
++    }
++    std::string device_guid(data, size);
+     response = "Successfully paired to " + host + " [guid=" + device_guid + "]";
+ 
+--- a/vendor/adb/client/auth.cpp
++++ b/vendor/adb/client/auth.cpp
+@@ -508,6 +508,5 @@
+ // Callback given to SSL_set_cert_cb to select a certificate when server requests
+ // for a certificate. This is where the server will give us a CA-issuer list, and
+-// figure out if the server knows any of our public keys. We currently always return
+-// 1 here to indicate success, since we always try a key here (in the case of no auth).
++// determine whether the device's keystore advertises this pairing key.
+ // See https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_set_cert_cb
+ // for more details.
+@@ -517,8 +516,5 @@
+     const STACK_OF(X509_NAME)* ca_list = SSL_get_client_CA_list(ssl);
+     if (ca_list == nullptr) {
+-        // Either the device doesn't know any keys, or !auth_required.
+-        // So let's just try with the default certificate and see what happens.
+-        VLOG(AUTH) << "No client CA list. Trying with default certificate.";
+-        return 1;
++        return 0;
+     }
+ 
+@@ -548,6 +544,5 @@
+             auto x509_str = X509ToPEMString(x509.get());
+             auto evp_str = Key::ToPEMString(evp_pkey.get());
+-            TlsConnection::SetCertAndKey(ssl, x509_str, evp_str);
+-            return 1;
++            return TlsConnection::SetCertAndKey(ssl, x509_str, evp_str) ? 1 : 0;
+         } else {
+             VLOG(AUTH) << "No match for [" << *adbFingerprint << "]";
+@@ -555,6 +550,4 @@
+     }
+ 
+-    // Let's just try with the default certificate anyways, because daemon might
+-    // not require auth, even though it has a list of keys.
+-    return 1;
+-}
++    return 0;
++}
+--- a/vendor/adb/client/main.cpp
++++ b/vendor/adb/client/main.cpp
+@@ -22,4 +22,6 @@
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ 
+@@ -87,4 +89,10 @@
+ int adb_server_main(int is_daemon, const std::string& socket_spec, const char* one_device,
+                     int ack_reply_fd) {
++    if (is_daemon || !getenv("CODY_ADB_PARENT_PID") ||
++        !socket_spec.starts_with("localfilesystem:")) {
++        return EXIT_FAILURE;
++    }
++    umask(077);
++
+ #if defined(_WIN32)
+     // adb start-server starts us up with stdout and stderr hooked up to
+@@ -132,26 +140,6 @@
+     atexit(adb_server_cleanup);
+ 
+-    init_reconnect_handler();
+-
+-#if ADB_MDNS
+-    if (mdns::is_enabled()) {
+-        init_mdns_transport_discovery();
+-    }
+-#endif
+-
+-    if (is_usb_enabled()) {
+-        if (is_libusb_enabled()) {
+-            libusb::usb_init();
+-        } else {
+-            usb_init();
+-        }
+-    } else {
+-        adb_notify_device_scan_complete();
+-    }
+-
+-    if (!getenv("ADB_EMU") || strcmp(getenv("ADB_EMU"), "0") != 0) {
+-        init_emulator_scanner(
+-                android::base::StringPrintf("tcp:%d", DEFAULT_ADB_LOCAL_TRANSPORT_PORT));
+-    }
++    // Only the addresses explicitly supplied for pair/connect may be used.
++    adb_notify_device_scan_complete();
+ 
+     std::string error;
+@@ -246,4 +234,15 @@
+ 
+ int main(int argc, char* argv[], char* envp[]) {
++    if (argc == 2 && std::string_view(argv[1]) == "cody-wireless-abi") {
++        puts("cody-adb-wireless-v1");
++        return EXIT_SUCCESS;
++    }
++    // Fail closed if Cody exited during startup, and don't leave an orphan on exit.
++    if (const char* parent = getenv("CODY_ADB_PARENT_PID")) {
++        if (parent != std::to_string(getppid()) || prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 ||
++            parent != std::to_string(getppid()) || prctl(PR_SET_DUMPABLE, 0) != 0) {
++            return EXIT_FAILURE;
++        }
++    }
+     __adb_argv = const_cast<const char**>(argv);
+     __adb_envp = const_cast<const char**>(envp);
+--- a/vendor/adb/client/transport_emulator.cpp
++++ b/vendor/adb/client/transport_emulator.cpp
+@@ -88,6 +88,7 @@
+ void connect_device(const std::string& address, std::string* response) {
+     CHECK_NOT_LOOPER_THREAD();
+-    if (address.empty()) {
+-        *response = "empty address";
++    const char* selected = getenv("CODY_ADB_CONNECT_ADDRESS");
++    if (!selected || address != selected) {
++        *response = "Connection address was not selected";
+         return;
+     }
+@@ -96,37 +97,11 @@
+     unique_fd fd;
+     int port;
+-    std::string transport_name, prefix_addr;
+-
+-    // If address does not match any socket type, it should default to TCP.
+-    if (address.starts_with("vsock:") || address.starts_with("localfilesystem:")) {
+-        prefix_addr = address;
+-    } else {
+-        prefix_addr = "tcp:" + address;
+-    }
+-
+-    socket_spec_connect(&fd, prefix_addr, &port, &transport_name, response);
++    std::string transport_name;
++
++    socket_spec_connect(&fd, "tcp:" + address, &port, &transport_name, response);
+     if (fd.get() == -1) {
+         return;
+     }
+-    auto reconnect = [prefix_addr](atransport* t) {
+-        if (prefix_addr.ends_with(MDNS_SERVICE_PROTOCOL)) {
+-            return ReconnectResult::Abort;
+-        }
+-        std::string response;
+-        unique_fd fd;
+-        int port;
+-        std::string serial;
+-        socket_spec_connect(&fd, prefix_addr, &port, &serial, &response);
+-        if (fd == -1) {
+-            LOG(INFO) << "reconnect " << serial << " failed: " << response;
+-            return ReconnectResult::Retry;
+-        }
+-        // This invokes the part of register_socket_transport() that needs to be
+-        // invoked if the atransport* has already been setup. This eventually
+-        // calls atransport->SetConnection() with a newly created Connection*
+-        // that will in turn send the CNXN packet.
+-        init_socket_transport_tcp(t, std::move(fd));
+-        return ReconnectResult::Success;
+-    };
++    auto reconnect = [](atransport*) { return ReconnectResult::Abort; };
+ 
+     int error;
+@@ -148,34 +123,6 @@
+ }
+ 
+-int connect_emulator_arbitrary_ports(int console_port, int adb_port, std::string* error) {
+-    CHECK_NOT_LOOPER_THREAD();
+-
+-    unique_fd fd;
+-
+-    if (find_emulator_transport_by_adb_port(adb_port) != nullptr ||
+-        find_emulator_transport_by_console_port(console_port) != nullptr) {
+-        return -1;
+-    }
+-
+-    const char* host = getenv("ADBHOST");
+-    if (host) {
+-        fd.reset(network_connect(host, adb_port, SOCK_STREAM, 0, error));
+-    }
+-
+-    if (fd < 0) {
+-        fd.reset(network_loopback_client(adb_port, SOCK_STREAM, error));
+-    }
+-
+-    if (fd >= 0) {
+-        D("client: connected on remote on fd %d", fd.get());
+-        close_on_exec(fd.get());
+-        disable_tcp_nagle(fd.get());
+-        std::string serial = getEmulatorSerialString(console_port);
+-        if (register_socket_transport(
+-                    std::move(fd), std::move(serial), adb_port, true,
+-                    [](atransport*) { return ReconnectResult::Abort; }, false)) {
+-            return 0;
+-        }
+-    }
++int connect_emulator_arbitrary_ports(int, int, std::string* error) {
++    *error = "Emulator discovery is disabled";
+     return -1;
+ }
+--- a/vendor/adb/crypto/rsa_2048_key.cpp
++++ b/vendor/adb/crypto/rsa_2048_key.cpp
+@@ -17,4 +17,5 @@
+ #include "adb/crypto/rsa_2048_key.h"
+ 
++#include <cstdlib>
+ #include <android-base/logging.h>
+ #include <crypto_utils/android_pubkey.h>
+@@ -44,7 +45,6 @@
+     out->resize(actual_length);
+     out->append(" ");
+-    out->append(sysdeps::GetLoginNameUTF8());
+-    out->append("@");
+-    out->append(sysdeps::GetHostNameUTF8());
++    const char* label = getenv("CODY_ADB_CLIENT_LABEL");
++    out->append(label ? label : "Cody");
+     return true;
+ }
+--- a/vendor/adb/tls/tls_connection.cpp
++++ b/vendor/adb/tls/tls_connection.cpp
+@@ -77,6 +77,7 @@
+     bssl::UniquePtr<SSL> ssl_;
+     std::vector<bssl::UniquePtr<X509>> known_certificates_;
+     bool client_verify_post_handshake_ = false;
++    bool client_certificate_selected_ = false;
+ 
+     CertVerifyCb cert_verify_cb_;
+     SetCertCb set_cert_cb_;
+@@ -146,7 +147,9 @@
+ 
+ int TlsConnectionImpl::SSLSetCertCb(SSL* ssl, void* opaque) {
+     auto* p = reinterpret_cast<TlsConnectionImpl*>(opaque);
+-    return p->set_cert_cb_(ssl);
++    const int result = p->set_cert_cb_(ssl);
++    p->client_certificate_selected_ = result == 1;
++    return result;
+ }
+ 
+ bool TlsConnectionImpl::AddTrustedCertificate(std::string_view cert) {
+@@ -284,6 +287,11 @@
+     }
+ 
+     if (client_verify_post_handshake_ && role_ == Role::Client) {
++        // BoringSSL discards the CertificateRequest issuer list after handshake.
++        if (!client_certificate_selected_) {
++            Invalidate();
++            return TlsError::PeerRejectedCertificate;
++        }
+         uint8_t check;
+         // Try to peek one byte for any failures. This assumes on success that
+         // the server actually sends something.
+--- a/vendor/adb/transport.cpp
++++ b/vendor/adb/transport.cpp
+@@ -334,4 +334,10 @@
+                 break;
+             }
++#if ADB_HOST
++            // Finish writing the plaintext upgrade reply before starting TLS.
++            if (packet->msg.command == A_STLS) {
++                adb_auth_tls_handshake(transport_);
++            }
++#endif
+         }
+         std::call_once(this->error_flag_, [this]() { transport_->HandleError("write failed"); });
+@@ -377,5 +383,5 @@
+     }
+     bool success = this->underlying_->DoTlsHandshake(key, auth_key);
+-    StartReadThread();
++    if (success) StartReadThread();
+     return success;
+ }
+@@ -431,5 +437,5 @@
+     }
+ 
+-    read_thread.join();
++    if (read_thread.joinable()) read_thread.join();
+     write_thread.join();
+ 
+@@ -481,4 +487,16 @@
+         return false;
+     }
++
++#if ADB_HOST
++    const auto& msg = packet->msg;
++    const bool upgrade = msg.command == A_STLS;
++    // Never pass legacy AUTH/CNXN (or other plaintext packets) to ADB.
++    if ((!tls_ && !upgrade) ||
++        (upgrade && (tls_ || msg.arg0 != A_STLS_VERSION || msg.arg1 != 0 ||
++                     msg.data_length != 0 || msg.data_check != 0 ||
++                     msg.magic != (A_STLS ^ 0xffffffffU)))) {
++        return false;
++    }
++#endif
+ 
+     if (packet->msg.data_length > MAX_PAYLOAD) {
+@@ -848,15 +866,5 @@
+     VLOG(TRANSPORT) << "destroying transport " << t->serial_name();
+     t->connection()->Stop();
+-#if ADB_HOST
+-    if (t->IsTcpDevice() && !t->kicked()) {
+-        D("transport: %s destroy (attempting reconnection)", t->name.c_str());
+-
+-        // We need to clear the transport's keys, so that on the next connection, it tries
+-        // again from the beginning.
+-        t->ResetKeys();
+-        reconnect_handler.TrackTransport(t);
+-        return;
+-    }
+-#endif
++    // A broken connection must be replaced by a new explicit, GUID-checked one.
+ 
+     D("transport: %s destroy (kicking and closing)", t->name.c_str());
+--- a/vendor/CMakeLists.libusb.txt
++++ b/vendor/CMakeLists.libusb.txt
+@@ -34,5 +34,5 @@
+ endif()
+ 
+-add_library(android_tools_libusb STATIC ${android_tools_libusb_SOURCES})
++add_library(android_tools_libusb SHARED ${android_tools_libusb_SOURCES})
+ 
+ target_include_directories(android_tools_libusb PRIVATE libusb/libusb libusb/libusb/os)

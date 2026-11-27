@@ -30,6 +30,7 @@ import { formatBytes } from "../format-bytes";
 import { isRecord } from "../type-guards";
 import { isDeviceNoData, MAX_DEVICE_TIMEOUT_MS } from "./protocol";
 import { matchDevice, type DeviceBridge } from "./bus";
+import { wirelessDeviceListLine } from "./wireless-tools";
 import type {
   DeviceActivity,
   DeviceCapabilities,
@@ -173,7 +174,8 @@ function formatActivity(activity: DeviceActivity, now: number): string | null {
 }
 
 async function deviceList(_args: DeviceToolArgs, ctx: DeviceToolContext): Promise<string> {
-  if (!ctx.bridge.attached) return NO_BROWSER_TEXT;
+  const wireless = ctx.sessionId ? wirelessDeviceListLine(ctx.sessionId) : null;
+  if (!ctx.bridge.attached) return wireless ? `${wireless}\nNo browser is attached for USB, serial or Bluetooth.` : NO_BROWSER_TEXT;
   const devices = ctx.bridge.list();
   const lines = [formatCapabilities(ctx.bridge.capabilities), "browser attached: yes"];
   if (devices.length === 0) {
@@ -188,6 +190,7 @@ async function deviceList(_args: DeviceToolArgs, ctx: DeviceToolContext): Promis
       if (summary) lines.push(`  ${summary}`);
     }
   }
+  if (wireless) lines.push(wireless);
   return lines.join("\n");
 }
 
@@ -631,7 +634,7 @@ const DEVICE_ARG = {
 export const DEVICE_TOOLS: DeviceToolDefinition[] = [
   {
     name: "device_list",
-    description: "List what this session's browser can reach: its Web Serial/WebUSB/Web Bluetooth capabilities, whether a browser is attached, and one line per device (id, label, kind, open/closed, buffered bytes).",
+    description: "List the Android tablet selected for this chat's server-side wireless tools, and the devices and capabilities of its attached browser (USB, serial and Bluetooth).",
     parameters: { type: "object", properties: {} },
     handler: deviceList,
   },

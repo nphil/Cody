@@ -142,19 +142,19 @@ async function main() {
     return result;
   }
 
-  /** Same envelope as callSessionTool, for browser-hosted hardware. A page
-   * quiet read may legitimately use the full 60s bridge budget, while the
-   * liveness watchdog is 65s; never cut that short with a fixed MCP timeout. */
-  async function callDeviceTool(tool, toolArgs) {
+  /** A browser quiet read can use the full 60s bridge budget. Wireless calls
+   * also pass the MCP cancellation signal all the way to the tablet service. */
+  async function callDeviceTool(tool, toolArgs, signal) {
     if (!devicesEndpoint || !sessionId) throw new Error("Cody device capability is unavailable");
     const requestedQuiet = Number.isSafeInteger(toolArgs?.timeoutMs) ? toolArgs.timeoutMs : 60_000;
     const quietBudget = Math.max(1, Math.min(60_000, requestedQuiet));
+    const deadline = AbortSignal.timeout(tool === "device_artifacts_import" || tool === "device_artifacts_export" ? 31 * 60_000
+      : tool === "device_artifacts_save" || tool === "wireless_files" ? 125_000 : quietBudget + 5_000);
     const response = await fetch(devicesEndpoint, {
       method: "POST",
       headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
-      signal: AbortSignal.timeout(tool === "device_artifacts_import" || tool === "device_artifacts_export" ? 31 * 60_000
-        : tool === "device_artifacts_save" ? 125_000 : quietBudget + 5_000),
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
@@ -378,7 +378,7 @@ async function main() {
     }
   });
   server.registerTool("device_list", {
-    description: "List what this session's browser can reach: its Web Serial/WebUSB/Web Bluetooth capabilities, whether a browser is attached, and one line per device (id, label, kind, open/closed, buffered bytes).",
+    description: "List the Android tablet selected for this chat's server-side wireless tools, and the devices and capabilities of its attached browser (USB, serial and Bluetooth).",
     inputSchema: {},
   }, async () => {
     try {
@@ -622,6 +622,40 @@ async function main() {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read the save" }] };
     }
   });
+  for (const [name, description, inputSchema] of [
+    ["wireless_inspect", "Run a read-only diagnostic on this chat's selected wireless Android device. Runs without root or an approval.", {
+      query: z.enum(["identity", "properties", "battery", "storage", "memory", "display", "uptime", "processes", "packages"]),
+      filter: z.string().optional().describe("Exact property name for properties, or package substring for packages."),
+    }],
+    ["wireless_logcat", "Read a bounded snapshot of Android logs from this chat's selected wireless device. Does not clear logs or follow them indefinitely.", {
+      buffer: z.enum(["main", "system", "crash", "events"]).optional(),
+      lines: z.number().int().min(1).optional().describe("Number of recent lines, subject to the server limit."),
+      tag: z.string().optional().describe("Only show this Android log tag."),
+      priority: z.enum(["V", "D", "I", "W", "E", "F"]).optional().describe("Minimum priority for the selected tag (or all tags if no tag is given)."),
+    }],
+    ["wireless_files", "List, stat, pull or push a file in the selected tablet's Android shared storage. Transfers use this chat's workspace, not a server path, and never overwrite existing files.", {
+      action: z.enum(["list", "stat", "pull", "push"]),
+      path: z.string().min(1).describe("Absolute path on the tablet under /sdcard or /storage/emulated/<user>."),
+      workspacePath: z.string().optional().describe("Pull destination or push source, relative to this chat's workspace. Required for pull/push; no links or hidden paths."),
+    }],
+    ["wireless_request_command", "Ask the person to approve one exact command on this chat's selected tablet. Nothing runs without their decision in Cody's Devices panel. Use elevated only for a command that needs root. Magisk may also ask on the tablet: use one-time permission, not a standing allow. Check the request with wireless_command_status.", {
+      command: z.string().min(1).describe("One exact Android command for the person to approve."),
+      elevated: z.boolean().describe("False for the normal Android shell, true to request root via Magisk."),
+      reason: z.string().optional().describe("Briefly explain why this command is needed."),
+    }],
+    ["wireless_command_status", "Read the state and result of this chat's exact-command approval request. This only reports; it cannot approve, execute or retry a command.", {
+      requestId: z.string().min(1).describe("The ID returned by wireless_request_command."),
+    }],
+  ]) {
+    server.registerTool(name, { description, inputSchema }, async (input, extra) => {
+      try {
+        return { content: [{ type: "text", text: await callDeviceTool(name, input, extra.signal) }] };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Wireless call failed";
+        return { isError: true, content: [{ type: "text", text: `${message} If a change was attempted, check the tablet's state before retrying.` }] };
+      }
+    });
+  }
   await server.connect(new StdioServerTransport());
 }
 

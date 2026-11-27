@@ -26,11 +26,12 @@
 
 import { SerialPort as PolyfillSerialPort } from "web-serial-polyfill";
 import type { HardwareTransport } from "./flasher";
-import type { DeviceOperationManager, HardwareTransportLease, PageOperationBridge, PageOperationCommand, PageOperationDelegate, PageOperationProgressFrame, PageOperationResultFrame, PageOperationSnapshotFrame } from "./operations";
-import { DeviceLeaseBook, type DeviceBorrowLease, type DeviceRawLease } from "./device-leases";
+import type { DeviceOperationManager, HardwareBorrowOptions, HardwareTransportLease, PageOperationBridge, PageOperationCommand, PageOperationDelegate, PageOperationProgressFrame, PageOperationResultFrame, PageOperationSnapshotFrame } from "./operations";
+import { DeviceLeaseBook, type DeviceBorrowLease, type DeviceRawLease, type DeviceReservation } from "./device-leases";
 import { QuietReadGate, assertQuietReadTimeout, isAbortError } from "./quiet-read";
 import { stableUsbIdentity, USB_REGRANT_MESSAGE } from "./usb-identity";
 import { pause } from "./pause";
+import { NativeSteps, UsbInterfaceClaimError, abortError, abortable, cancelledError, settleWithin, usbAcquisitionLimits, type NativeCall } from "./usb-acquisition";
 import { SessionConnectionPool, type RetainedSessionConnection } from "./session-connections";
 import { reconnectDelayMs } from "@/lib/stream-recovery";
 import { NO_CAPABILITIES, type BleServiceInfo, type BleTraceEvent, type DeviceActivity, type DeviceCapabilities, type DeviceClientFrame, type DeviceInfo, type DeviceKind, type DeviceOpName, type DeviceProtocolCandidate, type DeviceServerFrame, type UsbOpenResult } from "./protocol";
@@ -134,10 +135,12 @@ interface UsbQuietRead {
 interface UsbEntry extends RegistryEntryBase {
   kind: "usb";
   device: USBDevice;
+  generation: number;
+  attachment: AbortController;
   stableIdentity: string | null;
   invalidatedReason: string | null;
   needsNewGrant: boolean;
-  quietReads: Map<number, UsbQuietRead>;
+  rawOpenedBy?: DeviceBridgeConnection;
 }
 
 interface BleEntry extends RegistryEntryBase {
@@ -160,6 +163,7 @@ type RegistryEntry = SerialEntry | UsbEntry | BleEntry;
 const registry = new Map<string, RegistryEntry>();
 const deviceLeases = new DeviceLeaseBook();
 const USB_OWNER_STORAGE_KEY = "cody.usb.owner-sessions";
+let nextUsbGeneration = 0;
 
 function usbOwnerFor(identity: string): string | undefined {
   try {
@@ -174,12 +178,13 @@ function usbOwnerFor(identity: string): string | undefined {
   }
 }
 
-function rememberUsbOwner(identity: string, sessionId: string): void {
+function rememberUsbOwner(identity: string, sessionId: string | undefined): void {
   try {
     const raw = sessionStorage.getItem(USB_OWNER_STORAGE_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : {};
     const owners = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-    owners[identity] = sessionId;
+    if (sessionId === undefined) delete owners[identity];
+    else owners[identity] = sessionId;
     sessionStorage.setItem(USB_OWNER_STORAGE_KEY, JSON.stringify(owners));
   } catch {
     // Session storage can be disabled; failing closed means no automatic adoption.
@@ -269,6 +274,11 @@ function getUsbEntry(id: string, allowRecovery = false): UsbEntry {
   return entry;
 }
 
+function registeredUsbEntry(id: string): UsbEntry | undefined {
+  const entry = registry.get(id);
+  return entry?.kind === "usb" ? entry : undefined;
+}
+
 function getBleEntry(id: string): BleEntry {
   const entry = registry.get(id);
   if (!entry) throw new Error(`No such device: ${id}. It may have been unplugged or disconnected.`);
@@ -337,17 +347,24 @@ export async function requestSerialPort(): Promise<DeviceInfo> {
   return deriveDeviceInfo(id, entry);
 }
 
-function registerUsbDevice(device: USBDevice): DeviceInfo {
+function registerUsbDevice(device: USBDevice, observedGeneration = nextUsbGeneration): DeviceInfo {
   const exactId = findUsbDeviceId(device);
   const identity = stableUsbIdentity(device);
   const replacementId = exactId ?? findStableUsbEntryId(identity);
   if (replacementId) {
     const existing = registry.get(replacementId);
     if (existing?.kind === "usb") {
-      existing.device = device;
+      // A late getDevices() response must not undo a newer picker grant.
+      if (existing.generation > observedGeneration) return deriveDeviceInfo(replacementId, existing);
+      if (existing.device !== device) {
+        existing.attachment.abort("The previous USB connection was replaced.");
+        existing.device = device;
+        existing.generation = ++nextUsbGeneration;
+        existing.rawOpenedBy = undefined;
+      }
+      if (existing.attachment.signal.aborted) existing.attachment = new AbortController();
       existing.invalidatedReason = null;
-            existing.needsNewGrant = false;
-      existing.quietReads.clear();
+      existing.needsNewGrant = false;
       return deriveDeviceInfo(replacementId, existing);
     }
   }
@@ -355,10 +372,11 @@ function registerUsbDevice(device: USBDevice): DeviceInfo {
   const entry: UsbEntry = {
       kind: "usb",
       device,
+      generation: ++nextUsbGeneration,
+      attachment: new AbortController(),
       stableIdentity: identity,
       invalidatedReason: null,
       needsNewGrant: false,
-      quietReads: new Map(),
       label: usbLikeLabel("USB", device.vendorId, device.productId, device.productName),
       vendorId: device.vendorId,
       productId: device.productId,
@@ -424,15 +442,17 @@ function looksLikeSerialPort(device: USBDevice): boolean {
  * device to the browser and genuinely does need a new grant. That is the
  * permission model, not something to paper over.
  */
-export async function adoptPermittedUsbDevices(sessionId: string): Promise<DeviceInfo[]> {
-  if (!detectDeviceCapabilities().usb) return [];
+export async function adoptPermittedUsbDevices(sessionId: string, signal?: AbortSignal): Promise<DeviceInfo[]> {
+  if (signal?.aborted || !detectDeviceCapabilities().usb) return [];
+  const observedGeneration = nextUsbGeneration;
   const devices = await navigator.usb.getDevices().catch(() => [] as USBDevice[]);
+  if (signal?.aborted) return [];
   const adopted: DeviceInfo[] = [];
   for (const device of devices) {
     const identity = stableUsbIdentity(device);
     if (!identity || usbOwnerFor(identity) !== sessionId) continue;
     if (looksLikeSerialPort(device) && !findUsbDeviceId(device)) continue;
-    const info = registerUsbDevice(device);
+    const info = registerUsbDevice(device, observedGeneration);
     deviceLeases.claim(sessionId, info.id);
     adopted.push(info);
   }
@@ -516,7 +536,7 @@ export async function requestBluetoothDevice(extraOptionalServices: readonly str
  * browser's persistent permission grant. Distinct from the agent-driven
  * `close` op, which only ends the current session and leaves the grant (and
  * the device's row in the panel) alone so the agent can reopen it later. */
-export async function forgetDevice(id: string): Promise<void> {
+export async function forgetDevice(id: string, reservation?: DeviceRawLease): Promise<void> {
   const entry = registry.get(id);
   if (!entry) return;
   registry.delete(id);
@@ -525,8 +545,14 @@ export async function forgetDevice(id: string): Promise<void> {
     await entry.port.close().catch(() => {});
     await entry.port.forget().catch(() => {});
   } else if (entry.kind === "usb") {
-    await entry.device.close().catch(() => {});
-    await entry.device.forget().catch(() => {});
+    if (entry.stableIdentity) rememberUsbOwner(entry.stableIdentity, undefined);
+    entry.needsNewGrant = true;
+    entry.invalidatedReason = USB_REGRANT_MESSAGE;
+    entry.attachment.abort("The USB device was disconnected in Devices.");
+    const binding = bindUsb(entry, reservation);
+    await settleWithin(invalidateUsbHandle(binding, USB_REGRANT_MESSAGE), usbAcquisitionLimits.closeGraceMs);
+    const forgot = entry.device.forget().catch(() => {});
+    await (reservation?.track(forgot) ?? forgot);
   } else {
     entry.server?.disconnect();
     await entry.device.forget().catch(() => {});
@@ -557,18 +583,20 @@ export function watchDeviceLifecycle(id: string, callbacks: { onGone: (reason?: 
   }
 
   if (entry.kind === "usb" || (entry.kind === "serial" && entry.transport === "webusb-polyfill")) {
-    const usbDevice = entry.kind === "usb" ? entry.device : entry.usbDevice;
     const listener = (event: USBConnectionEvent) => {
-          if (event.device !== usbDevice) return;
-          if (entry.kind === "usb") {
-            entry.invalidatedReason = USB_REGRANT_MESSAGE;
-                    entry.needsNewGrant = true;
-            entry.quietReads.clear();
-          } else {
-            registry.delete(id);
-          }
-          callbacks.onGone("The device was unplugged.");
-        };
+      if (registry.get(id) !== entry || event.device !== (entry.kind === "usb" ? entry.device : entry.usbDevice)) return;
+      if (entry.kind === "usb") {
+        if (!entry.needsNewGrant) {
+          entry.generation = ++nextUsbGeneration;
+          entry.invalidatedReason = USB_REGRANT_MESSAGE;
+          entry.needsNewGrant = true;
+          entry.attachment.abort("The USB device was unplugged.");
+        }
+      } else {
+        registry.delete(id);
+      }
+      callbacks.onGone("The device was unplugged.");
+    };
     navigator.usb.addEventListener("disconnect", listener);
     return () => navigator.usb.removeEventListener("disconnect", listener);
   }
@@ -813,10 +841,29 @@ interface DeviceOpHooks {
  * interface gets the failure thrown instead — there is no partial success to
  * report when only one thing was asked for.
  */
+async function claimUsbInterface(device: USBDevice, iface: USBInterface, native: NativeCall, alternate = iface.alternate): Promise<UsbInterfaceClaimError | null> {
+  return native(`claiming interface ${iface.interfaceNumber}`, async () => {
+    try {
+      await device.claimInterface(iface.interfaceNumber);
+      return null;
+    } catch (cause) {
+      return new UsbInterfaceClaimError({
+        interfaceNumber: iface.interfaceNumber,
+        alternateSetting: alternate?.alternateSetting,
+        classCode: alternate?.interfaceClass,
+        subclassCode: alternate?.interfaceSubclass,
+        protocolCode: alternate?.interfaceProtocol,
+      }, cause);
+    }
+  });
+}
+
 async function claimUsbInterfaces(
   device: USBDevice,
   only: number | undefined,
   requestedAlternate: { interfaceNumber: number; alternateSetting: number } | undefined,
+  native: NativeCall,
+  refusals?: Map<number, UsbInterfaceClaimError>,
 ): Promise<UsbOpenResult> {
   if (requestedAlternate && only !== undefined && only !== requestedAlternate.interfaceNumber) {
     throw new Error("The requested USB interface and alternate interface must be the same.");
@@ -829,16 +876,16 @@ async function claimUsbInterfaces(
   for (const iface of configuration.interfaces) {
     if (only !== undefined && iface.interfaceNumber !== only) continue;
     const alternateRequest = requestedAlternate?.interfaceNumber === iface.interfaceNumber ? requestedAlternate : undefined;
-    if (alternateRequest && !iface.alternates.some((alternate) => alternate.alternateSetting === alternateRequest.alternateSetting)) {
+    const target = alternateRequest && iface.alternates.find((alternate) => alternate.alternateSetting === alternateRequest.alternateSetting);
+    if (alternateRequest && !target) {
       throw new Error(`USB interface ${iface.interfaceNumber} has no alternate setting ${alternateRequest.alternateSetting}.`);
     }
     if (!iface.claimed) {
-      try {
-        await device.claimInterface(iface.interfaceNumber);
-      } catch (error) {
-        if (only !== undefined || alternateRequest) throw error;
+      const refusal = await claimUsbInterface(device, iface, native, target ?? iface.alternate ?? iface.alternates[0]);
+      if (refusal) {
+        if (only !== undefined || alternateRequest || !iface.alternate) throw refusal;
+        refusals?.set(iface.interfaceNumber, refusal);
         const alternate = iface.alternate;
-        if (!alternate) throw error;
         result.interfaces.push({
           interfaceNumber: iface.interfaceNumber,
           alternateSetting: alternate.alternateSetting,
@@ -852,13 +899,13 @@ async function claimUsbInterfaces(
             type: endpoint.type,
             packetSize: endpoint.packetSize,
           })),
-          error: error instanceof Error ? error.message : String(error),
+          error: refusal.originalMessage,
         });
         continue;
       }
     }
     if (alternateRequest && iface.alternate?.alternateSetting !== alternateRequest.alternateSetting) {
-      await device.selectAlternateInterface(iface.interfaceNumber, alternateRequest.alternateSetting);
+      await native(`selecting alternate ${alternateRequest.alternateSetting} of interface ${iface.interfaceNumber}`, () => device.selectAlternateInterface(iface.interfaceNumber, alternateRequest.alternateSetting));
     }
     const alternate = iface.alternate;
     if (!alternate) throw new Error(`USB interface ${iface.interfaceNumber} has no selected alternate setting.`);
@@ -913,32 +960,68 @@ async function stopSerialPump(entry: SerialEntry): Promise<void> {
   entry.reader = null;
 }
 
-async function invalidateUsbEntry(entry: UsbEntry, reason: string): Promise<void> {
-  entry.invalidatedReason = reason;
-  entry.needsNewGrant = false;
-  entry.quietReads.clear();
-  await entry.device.close().catch(() => {});
+/** One reservation pins its I/O and cleanup to the browser object it began with. */
+interface UsbBinding {
+  readonly entry: UsbEntry;
+  readonly device: USBDevice;
+  readonly generation: number;
+  readonly detached: AbortSignal;
+  readonly reservation?: DeviceReservation;
+  quietReads?: Map<number, UsbQuietRead>;
+  closing?: Promise<void>;
+}
+
+function bindUsb(entry: UsbEntry, reservation?: DeviceReservation): UsbBinding {
+  return { entry, device: entry.device, generation: entry.generation, detached: entry.attachment.signal, reservation };
+}
+
+function invalidateUsbHandle(binding: UsbBinding, reason: string): Promise<void> {
+  if (binding.closing) return binding.closing;
+  const { entry, device, generation, reservation } = binding;
+  if (entry.generation === generation) {
+    entry.rawOpenedBy = undefined;
+    if (!entry.needsNewGrant) entry.invalidatedReason = reason;
+  }
+  binding.quietReads?.clear();
+  reservation?.note({ step: "closing the device", since: Date.now() });
+  const closing = (async () => {
+    try { await device.close(); } catch { /* It may already have left the bus. */ }
+  })();
+  binding.closing = reservation?.track(closing) ?? closing;
+  return binding.closing;
+}
+
+function closeAfterUsbSteps(binding: UsbBinding, steps: NativeSteps, reason: string): Promise<void> {
+  // Install the cleanup hold before releasing the owner. There is no gap
+  // between the late open/claim answering and its handle being closed.
+  const closing = steps.settled().then(() => invalidateUsbHandle(binding, reason));
+  return binding.reservation?.track(closing) ?? closing;
 }
 
 async function readUsbQuietly(
-  entry: UsbEntry,
+  binding: UsbBinding,
   endpoint: number,
   length: number,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ value: USBInTransferResult | null; noData: boolean }> {
   assertQuietReadTimeout(timeoutMs);
-  let quietRead = entry.quietReads.get(endpoint);
+  const reads = binding.quietReads ??= new Map();
+  let quietRead = reads.get(endpoint);
   if (!quietRead) {
     const state: UsbQuietRead = {
       length,
       gate: new QuietReadGate(
-        () => entry.device.transferIn(endpoint, state.length),
-        async (reason) => invalidateUsbEntry(entry, reason),
+        () => {
+          binding.reservation?.note({ step: "reading the device", since: Date.now() });
+          const transfer = binding.device.transferIn(endpoint, state.length);
+          return binding.reservation?.track(transfer) ?? transfer;
+        },
+        (reason) => invalidateUsbHandle(binding, reason),
       ),
     };
     quietRead = state;
-    entry.quietReads.set(endpoint, quietRead);
+    reads.set(endpoint, quietRead);
   } else {
     quietRead.length = Math.max(quietRead.length, length);
   }
@@ -1012,6 +1095,8 @@ async function performDeviceOp(
   params: Record<string, unknown>,
   hooks: DeviceOpHooks,
   timeoutMs: number | undefined,
+  lease: DeviceRawLease,
+  usbAuthority: AbortSignal,
 ): Promise<unknown | typeof NO_DATA> {
   if (!isDeviceOpName(rawOp)) throw new Error(`Unknown device operation "${rawOp}".`);
   const op = rawOp;
@@ -1067,7 +1152,7 @@ async function performDeviceOp(
         await stopSerialPump(entry);
         await entry.port.close().catch(() => {});
       } else if (entry.kind === "usb") {
-        await invalidateUsbEntry(entry, "The USB device was closed.");
+        await invalidateUsbHandle(bindUsb(entry, lease), "The USB device was closed.");
       } else {
         entry.server?.disconnect();
         recordBleTrace(entry, { type: "disconnect", detail: "Disconnected by Cody." });
@@ -1159,18 +1244,41 @@ async function performDeviceOp(
       return undefined;
     }
     case "usb.open": {
-      const entry = getUsbEntry(deviceId, true);
-      await entry.device.open();
-      entry.invalidatedReason = null;
-      entry.needsNewGrant = false;
-      entry.quietReads.clear();
-      const configuration = num(params, "configuration");
-      if (configuration !== undefined) {
-        await entry.device.selectConfiguration(configuration);
-      } else if (entry.device.configuration === null && entry.device.configurations.length > 0) {
-        await entry.device.selectConfiguration(entry.device.configurations[0].configurationValue);
+      const binding = bindUsb(getUsbEntry(deviceId, true), lease);
+      const { entry, device, generation } = binding;
+      const assertUsable = () => {
+        if (entry.generation !== generation || entry.needsNewGrant) throw new Error(USB_REGRANT_MESSAGE);
+      };
+      const steps = new NativeSteps(lease, assertUsable);
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort("the USB open deadline passed"), usbAcquisitionLimits.rawOpenMs);
+      const signal = AbortSignal.any([usbAuthority, binding.detached, deadline.signal]);
+      const native = steps.within(signal);
+      try {
+        await native("opening the device", () => device.open());
+        assertUsable();
+        entry.invalidatedReason = null;
+        const configuration = num(params, "configuration") ?? (device.configuration === null ? device.configurations[0]?.configurationValue : undefined);
+        if (configuration !== undefined) {
+          await native("selecting the USB configuration", () => device.selectConfiguration(configuration));
+        }
+        const result = await claimUsbInterfaces(device, num(params, "interface"), usbAlternateOf(params), native);
+        assertUsable();
+        if (signal.aborted) throw abortError(signal);
+        return result;
+      } catch (error) {
+        if (signal.aborted || entry.generation !== generation || entry.needsNewGrant) {
+          void closeAfterUsbSteps(binding, steps, "The USB open ended before setup finished.");
+        }
+        if (deadline.signal.aborted) {
+          throw new Error(`The browser did not finish ${steps.step ?? "opening the USB device"} before the deadline. `
+            + "Cody keeps this handle reserved until the browser answers and closes it; nothing is retried. "
+            + "If it does not answer, unplug and reconnect the device or use Disconnect in Devices and grant it again.", { cause: error });
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
       }
-      return claimUsbInterfaces(entry.device, num(params, "interface"), usbAlternateOf(params));
     }
     case "usb.control": {
       const entry = getUsbEntry(deviceId);
@@ -1182,7 +1290,7 @@ async function performDeviceOp(
         index: requireNum(params, "index"),
       };
       if (usbDirectionOf(params) === "in") {
-        const result = await readRawUsbWithDeadline(entry, timeoutMs ?? DEFAULT_RAW_USB_IN_TIMEOUT_MS, () => entry.device.controlTransferIn(setup, num(params, "length") ?? DEFAULT_USB_IN_LENGTH));
+        const result = await readRawUsbWithDeadline(bindUsb(entry, lease), timeoutMs ?? DEFAULT_RAW_USB_IN_TIMEOUT_MS, () => entry.device.controlTransferIn(setup, num(params, "length") ?? DEFAULT_USB_IN_LENGTH));
         if (result === NO_DATA) return NO_DATA;
         return { base64: result.data ? toBase64(viewToBytes(result.data)) : "" };
       }
@@ -1194,7 +1302,7 @@ async function performDeviceOp(
       const entry = getUsbEntry(deviceId);
       const endpoint = requireNum(params, "endpoint");
       if (usbDirectionOf(params) === "in") {
-        const result = await readRawUsbWithDeadline(entry, timeoutMs ?? DEFAULT_RAW_USB_IN_TIMEOUT_MS, () => entry.device.transferIn(endpoint, num(params, "length") ?? DEFAULT_USB_IN_LENGTH));
+        const result = await readRawUsbWithDeadline(bindUsb(entry, lease), timeoutMs ?? DEFAULT_RAW_USB_IN_TIMEOUT_MS, () => entry.device.transferIn(endpoint, num(params, "length") ?? DEFAULT_USB_IN_LENGTH));
         if (result === NO_DATA) return NO_DATA;
         return { base64: result.data ? toBase64(viewToBytes(result.data)) : "" };
       }
@@ -1319,36 +1427,17 @@ function operationCommandFrom(raw: unknown): PageOperationCommand | null {
   return null;
 }
 
-function cancelledError(): Error {
-  const error = new Error("The device operation was cancelled.");
-  error.name = "AbortError";
-  return error;
-}
-
-async function runUsbAbortable<T>(entry: UsbEntry, signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
-  if (signal.aborted) {
-    await invalidateUsbEntry(entry, "The USB transfer was cancelled.");
-    throw cancelledError();
+async function runUsbAbortable<T>(binding: UsbBinding, signal: AbortSignal, operation: () => Promise<T>, beforeSubmit?: () => void): Promise<T> {
+  if (signal.aborted) throw abortError(signal);
+  beforeSubmit?.();
+  binding.reservation?.note({ step: "transferring data", since: Date.now() });
+  const native = operation();
+  binding.reservation?.track(native);
+  try {
+    return await abortable(native, signal, () => { void invalidateUsbHandle(binding, "The USB transfer was cancelled."); });
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error));
   }
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const finish = (done: () => void) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", abort);
-      done();
-    };
-    const abort = () => {
-      finish(() => {
-        void invalidateUsbEntry(entry, "The USB transfer was cancelled.").finally(() => reject(cancelledError()));
-      });
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    void operation().then(
-      (value) => finish(() => resolve(value)),
-      (error: unknown) => finish(() => reject(error instanceof Error ? error : new Error(String(error)))),
-    );
-  });
 }
 
 function selectBorrowInterface(device: USBDevice, requested: number | undefined): number | undefined {
@@ -1382,11 +1471,11 @@ function webUsbBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(bytes);
 }
 
-async function readRawUsbWithDeadline<T>(entry: UsbEntry, timeoutMs: number, operation: () => Promise<T>): Promise<T | typeof NO_DATA> {
+async function readRawUsbWithDeadline<T>(binding: UsbBinding, timeoutMs: number, operation: () => Promise<T>): Promise<T | typeof NO_DATA> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await runUsbAbortable(entry, controller.signal, operation);
+    return await runUsbAbortable(binding, controller.signal, operation);
   } catch (error) {
     if (isAbortError(error) && controller.signal.aborted) return NO_DATA;
     throw error;
@@ -1401,6 +1490,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   private reconnectAttempt = 0;
   private destroyed = false;
   private authorityRevoked = false;
+  private readonly usbAuthority = new AbortController();
   private artifactConnection = new AbortController();
   private readonly capabilities: DeviceCapabilities;
   private snapshot: DeviceBridgeSnapshot;
@@ -1493,9 +1583,9 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     navigator.usb.addEventListener("connect", this.usbConnectListener);
   }
 
-  private async adoptPermitted(): Promise<void> {
-    const adopted = await adoptPermittedUsbDevices(this.sessionId);
-    if (this.destroyed || adopted.length === 0) return;
+  private async adoptPermitted(signal = this.usbAuthority.signal): Promise<void> {
+    const adopted = await adoptPermittedUsbDevices(this.sessionId, signal);
+    if (signal.aborted || adopted.length === 0) return;
     for (const info of adopted) this.watchLifecycle(info.id);
     this.refresh();
   }
@@ -1503,7 +1593,9 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   destroy(): void {
     this.destroyed = true;
     this.artifactConnection.abort();
+    this.usbAuthority.abort("Device connection closed.");
     this.operationManager?.revokeAuthority("Device connection closed.");
+    this.closeIdleUsbHandles();
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.coalescer.destroy();
@@ -1549,7 +1641,9 @@ export class DeviceBridgeConnection implements PageOperationBridge {
             this.authorityRevoked = true;
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = undefined;
+            this.usbAuthority.abort(event.reason);
             this.operationManager?.revokeAuthority(event.reason);
+            this.closeIdleUsbHandles();
             this.setSnapshot({ attached: false, error: event.reason });
             return;
           }
@@ -1672,16 +1766,21 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       return;
     }
     let rawLease: DeviceRawLease | undefined;
+    const usb = registeredUsbEntry(frame.deviceId);
+    const generation = usb?.generation;
     try {
-      rawLease = deviceLeases.claimForRawOperation(this.sessionId, frame.deviceId);
+      rawLease = deviceLeases.claimForRawOperation(this.sessionId, frame.deviceId, usb);
+      if (frame.op === "usb.open" && usb) usb.rawOpenedBy = this;
       const value = await performDeviceOp(frame.op, frame.deviceId, frame.params, {
         onSerialData: (deviceId, bytes) => this.coalescer.push(deviceId, bytes),
         onBleNotify: (deviceId, characteristic, bytes) => this.coalescer.push(`${deviceId}\u0000${characteristic}`, bytes),
-      }, frame.timeoutMs);
+      }, frame.timeoutMs, rawLease, this.usbAuthority.signal);
       if (frame.op === "close") {
         rawLease.release();
         rawLease = undefined;
-        deviceLeases.release(this.sessionId, frame.deviceId);
+        if (!usb || (registeredUsbEntry(frame.deviceId) === usb && usb.generation === generation)) {
+          deviceLeases.release(this.sessionId, frame.deviceId);
+        }
       }
       this.send(value === NO_DATA
         ? { type: "result", id: frame.id, status: "no-data" }
@@ -1691,6 +1790,10 @@ export class DeviceBridgeConnection implements PageOperationBridge {
         ? { type: "result", id: frame.id, status: "cancelled", reason: error instanceof Error ? error.message : "The device operation was cancelled." }
         : { type: "result", id: frame.id, status: "error", error: error instanceof Error ? error.message : String(error) });
     } finally {
+      if (rawLease && usb && usb.generation === generation && usb.rawOpenedBy === this
+        && this.usbAuthority.signal.aborted && (frame.op === "usb.control" || frame.op === "usb.transfer")) {
+        void invalidateUsbHandle(bindUsb(usb, rawLease), "This Cody page no longer hosts the device.");
+      }
       rawLease?.release();
     }
     this.refresh();
@@ -1713,16 +1816,36 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     this.lifecycleUnsubs.set(id, unsubscribe);
   }
 
-  async borrowHardwareTransport(deviceId: string, options: { interfaceNumber?: number; alternateSetting?: number; pinConnection?: boolean } = {}): Promise<HardwareTransportLease> {
-    const ownership = deviceLeases.borrow(this.sessionId, deviceId);
+  /** A replacement host must not be blocked by this page's idle raw USB handles. Active or abandoned opens close their own handle when the browser answers. */
+  private closeIdleUsbHandles(): void {
+    for (const [id, entry] of registry) {
+      if (entry.kind !== "usb" || entry.rawOpenedBy !== this || !entry.device.opened || !deviceLeases.owns(this.sessionId, id)) continue;
+      let lease: DeviceRawLease;
+      try {
+        lease = deviceLeases.claimForRawOperation(this.sessionId, id, entry);
+      } catch {
+        continue; // A reservation already covers this handle.
+      }
+      void invalidateUsbHandle(bindUsb(entry, lease), "Another Cody page took over this session's devices.");
+      lease.release();
+    }
+  }
+
+  async borrowHardwareTransport(deviceId: string, options: HardwareBorrowOptions = {}): Promise<HardwareTransportLease> {
+    const signal = options.signal ? AbortSignal.any([options.signal, this.usbAuthority.signal]) : this.usbAuthority.signal;
+    if (signal.aborted) throw abortError(signal);
+    let entry = registry.get(deviceId);
+    // Resolve a reconnect before reserving the handle that the lease will use.
+    if (entry?.kind === "usb" && entry.needsNewGrant) {
+      await abortable(this.adoptPermitted(signal), signal);
+      entry = registry.get(deviceId);
+    }
+    if (signal.aborted) throw abortError(signal);
+    if (!entry) throw new Error(`No such device: ${deviceId}. It may have been unplugged or disconnected.`);
+    const ownership = deviceLeases.borrow(this.sessionId, deviceId, entry.kind === "usb" ? entry : undefined);
     try {
-      const entry = registry.get(deviceId);
-      if (!entry) throw new Error(`No such device: ${deviceId}. It may have been unplugged or disconnected.`);
-      // A granted USB device that left the bus and is back may not be adopted again yet (its
-      // connect event can be missed, or arrive after this call): look for it before giving up.
-      if (entry.kind === "usb" && entry.needsNewGrant) await this.adoptPermitted();
       if (entry.kind === "serial") return await this.borrowSerialTransport(entry, ownership);
-      if (entry.kind === "usb") return await this.borrowUsbTransport(entry, ownership, options);
+      if (entry.kind === "usb") return await this.borrowUsbTransport(entry, ownership, options, signal);
       throw new Error("Bluetooth devices cannot be borrowed as a byte transport.");
     } catch (error) {
       ownership.release();
@@ -1730,21 +1853,33 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     }
   }
 
-  async reacquireHardwareTransport(deviceId: string, identity: string, options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal; timeoutMs?: number }): Promise<HardwareTransportLease> {
+  async reacquireHardwareTransport(deviceId: string, identity: string, options: HardwareBorrowOptions & { signal: AbortSignal; timeoutMs?: number }): Promise<HardwareTransportLease> {
     const initial = registry.get(deviceId);
     if (initial?.kind !== "usb" || initial.stableIdentity !== identity) throw new Error("USB recovery identity does not match the originally leased device.");
     const windowMs = options.timeoutMs ?? USB_REACQUIRE_WINDOW_MS;
-    const deadline = Date.now() + windowMs;
-    while (Date.now() < deadline) {
-      if (options.signal.aborted) throw cancelledError();
-      await this.adoptPermitted();
-      const current = registry.get(deviceId);
-      if (current?.kind === "usb" && current.stableIdentity === identity && !current.invalidatedReason && !current.needsNewGrant) {
-        return this.borrowHardwareTransport(deviceId, options);
+    const expires = new AbortController();
+    const signal = AbortSignal.any([options.signal, this.usbAuthority.signal, expires.signal]);
+    const timer = setTimeout(() => expires.abort("the USB reconnect deadline passed"), windowMs);
+    try {
+      while (!signal.aborted) {
+        await abortable(this.adoptPermitted(signal), signal);
+        const current = registry.get(deviceId);
+        if (current?.kind === "usb" && current.stableIdentity === identity && !current.invalidatedReason && !current.needsNewGrant) {
+          return await this.borrowHardwareTransport(deviceId, { ...options, signal });
+        }
+        await pause(100, signal);
       }
-      await pause(Math.min(100, Math.max(0, deadline - Date.now())), options.signal);
+      throw abortError(signal);
+    } catch (error) {
+      if (expires.signal.aborted) {
+        const expired = new Error(`The same USB device did not return and finish opening within ${Math.max(1, Math.round(windowMs / 1000))} seconds. Reconnect it and grant it again if its USB identity changed; nothing is retried.`, { cause: error });
+        if (error && typeof error === "object" && "usbCleanup" in error) Object.assign(expired, { usbCleanup: error.usbCleanup });
+        throw expired;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    throw new Error(`The same USB device did not reappear within ${Math.max(1, Math.round(windowMs / 1000))} seconds. Reconnect it and grant it again if its USB identity changed.`);
   }
 
   /**
@@ -1855,102 +1990,162 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     };
   }
 
-  private async borrowUsbTransport(entry: UsbEntry, ownership: DeviceBorrowLease, options: { interfaceNumber?: number; alternateSetting?: number; pinConnection?: boolean }): Promise<HardwareTransportLease> {
+  private async borrowUsbTransport(entry: UsbEntry, ownership: DeviceBorrowLease, options: HardwareBorrowOptions, callerSignal: AbortSignal): Promise<HardwareTransportLease> {
     const requestedInterface = options.interfaceNumber;
     if (options.alternateSetting !== undefined && requestedInterface === undefined) throw new Error("alternateSetting requires interfaceNumber.");
     const requestedAlternate = options.alternateSetting === undefined || requestedInterface === undefined ? undefined : { interfaceNumber: requestedInterface, alternateSetting: options.alternateSetting };
-    const grant = getUsbEntry([...registry.entries()].find(([, candidate]) => candidate === entry)?.[0] ?? "", true);
-    // Adoption may replace grant.device even with identical VID/PID/serial. One Fastboot run's reads, writes,
-    // aborts and close must address its original native object, never the unit that subsequently took its place.
-    const ready = options.pinConnection ? { ...grant, quietReads: new Map<number, UsbQuietRead>() } : grant;
-    const stillAttached = () => grant.device === ready.device && !grant.invalidatedReason && !grant.needsNewGrant && ready.device.opened;
+    const binding = bindUsb(entry, ownership);
+    const { device, generation } = binding;
+    const acquisitionSignal = AbortSignal.any([callerSignal, binding.detached]);
+    const stillAttached = () => entry.generation === generation && !entry.invalidatedReason && !entry.needsNewGrant && !binding.closing && device.opened;
     let initialized = false, released = false;
-    const ensureReady = async (): Promise<void> => {
+    const assertUsable = () => {
       if (released) throw new Error("The hardware operation lease ended.");
-      if (grant.needsNewGrant) throw new Error(USB_REGRANT_MESSAGE);
-      if (initialized && options.pinConnection) {
-        if (!stillAttached()) throw new Error("Fastboot lost its original USB connection. Start a fresh operation; nothing is replayed.");
-        return;
+      if (this.usbAuthority.signal.aborted) throw abortError(this.usbAuthority.signal);
+      if (entry.generation !== generation || (initialized && options.pinConnection && !stillAttached())) {
+        throw new Error(options.pinConnection
+          ? "Fastboot lost its original USB connection. Start a fresh operation; nothing is replayed."
+          : "The USB device disconnected or its original connection was replaced. Start a fresh operation; nothing is replayed.");
       }
-      if (!ready.device.opened) {
-        await ready.device.open();
-        if (grant.device === ready.device) grant.invalidatedReason = null;
-        if (ready.device.configuration === null && ready.device.configurations.length > 0) {
-          await ready.device.selectConfiguration(ready.device.configurations[0].configurationValue);
+      if (entry.needsNewGrant) throw new Error(USB_REGRANT_MESSAGE);
+    };
+    const steps = new NativeSteps(ownership, assertUsable, options.onProgress && ((progress) => {
+      if (!initialized) options.onProgress?.(progress);
+    }));
+    const refusals = new Map<number, UsbInterfaceClaimError>();
+    const acquire = async (signal: AbortSignal) => {
+      assertUsable();
+      const native = steps.within(signal);
+      if (!device.opened) {
+        await native("opening the device", () => device.open());
+        assertUsable();
+        entry.invalidatedReason = null;
+        if (device.configuration === null && device.configurations.length > 0) {
+          await native("selecting the USB configuration", () => device.selectConfiguration(device.configurations[0].configurationValue));
         }
       }
-      await claimUsbInterfaces(ready.device, requestedInterface, requestedAlternate);
+      refusals.clear();
+      await claimUsbInterfaces(device, requestedInterface, requestedAlternate, native, refusals);
+      assertUsable();
+      if (signal.aborted) throw abortError(signal);
     };
-    await ensureReady();
-    initialized = true;
-    if (options.pinConnection && !stillAttached()) {
-      await ready.device.close().catch(() => {});
-      throw new Error("Fastboot lost its original USB connection during setup.");
+    const checkClaim = (interfaceNumber: number | undefined) => {
+      const refusal = interfaceNumber === undefined ? undefined : refusals.get(interfaceNumber);
+      if (refusal) throw refusal;
+    };
+    const endLease = () => {
+      released = true;
+      const closing = closeAfterUsbSteps(binding, steps, "The hardware operation lease ended.");
+      ownership.release();
+      return closing;
+    };
+    try {
+      await acquire(acquisitionSignal);
+      const interfaceNumber = selectBorrowInterface(device, requestedInterface);
+      checkClaim(interfaceNumber);
+      const selectedInterface = () => device.configuration?.interfaces.find((candidate) => candidate.interfaceNumber === interfaceNumber);
+      const selectedAlternate = selectedInterface()?.alternate ?? undefined;
+      const dfu = selectedAlternate?.interfaceClass === 0xfe && selectedAlternate.interfaceSubclass === 0x01 && selectedAlternate.interfaceProtocol === 0x02 && interfaceNumber !== undefined
+        ? { interfaceNumber, alternateSetting: selectedAlternate.alternateSetting, ...(selectedAlternate.interfaceName ? { alternateName: selectedAlternate.interfaceName } : {}) }
+        : undefined;
+      let controlInterface: number | undefined;
+      const claimControl = async (signal: AbortSignal) => {
+        if (controlInterface === undefined) return;
+        checkClaim(controlInterface);
+        const iface = device.configuration?.interfaces.find((candidate) => candidate.interfaceNumber === controlInterface);
+        if (!iface) throw new Error(`USB CDC control interface ${controlInterface} is unavailable.`);
+        if (iface.claimed) return;
+        const refusal = await claimUsbInterface(device, iface, steps.within(signal));
+        if (refusal) throw refusal;
+      };
+      if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {
+        controlInterface = await cdcControlInterface(device, interfaceNumber, steps.within(acquisitionSignal));
+        await claimControl(acquisitionSignal);
+      }
+      if (acquisitionSignal.aborted) throw abortError(acquisitionSignal);
+      initialized = true;
+      assertUsable();
+      const requireEndpoint = (direction: "in" | "out"): number => {
+        if (interfaceNumber === undefined) throw new Error("This USB protocol needs an explicitly selected transfer interface.");
+        return borrowEndpoint(device, interfaceNumber, direction);
+      };
+      let preparing: Promise<void> | undefined;
+      const ensureReady = async (signal: AbortSignal): Promise<void> => {
+        assertUsable();
+        if (signal.aborted) throw abortError(signal);
+        if (options.pinConnection) return;
+        if (!binding.closing && device.opened && (interfaceNumber === undefined || selectedInterface()?.claimed)) return;
+        if (!preparing) {
+          const setupSignal = AbortSignal.any([signal, binding.detached, this.usbAuthority.signal]);
+          preparing = (async () => {
+            await abortable(steps.settled(), setupSignal);
+            if (binding.closing) await abortable(binding.closing, setupSignal);
+            binding.closing = undefined;
+            await acquire(setupSignal);
+            checkClaim(interfaceNumber);
+            await claimControl(setupSignal);
+          })().finally(() => { preparing = undefined; });
+        }
+        await abortable(preparing, signal);
+      };
+      const transport: HardwareTransport = {
+        kind: "usb",
+        interfaceNumber,
+        alternateSetting: selectedAlternate?.alternateSetting,
+        ...(dfu ? { dfu } : {}),
+        read: async (length, timeoutMs, signal) => {
+          if (!Number.isInteger(length) || length <= 0) throw new Error("USB read length must be a positive integer.");
+          await ensureReady(signal);
+          assertUsable();
+          const result = await readUsbQuietly(binding, requireEndpoint("in"), length, timeoutMs, signal);
+          return result.noData ? null : result.value?.data ? viewToBytes(result.value.data) : new Uint8Array(0);
+        },
+        write: async (bytes, signal) => {
+          await ensureReady(signal);
+          await runUsbAbortable(binding, signal, async () => {
+            const result = await device.transferOut(requireEndpoint("out"), webUsbBytes(bytes));
+            if (result.status !== "ok") throw new Error(`USB bulk write failed: ${result.status}.`);
+            if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB bulk write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
+          }, assertUsable);
+        },
+        controlIn: async (setup, length, signal) => {
+          await ensureReady(signal);
+          const result = await runUsbAbortable(binding, signal, () => device.controlTransferIn(setup, length), assertUsable);
+          return result.data ? viewToBytes(result.data) : new Uint8Array(0);
+        },
+        controlOut: async (setup, bytes, signal) => {
+          await ensureReady(signal);
+          await runUsbAbortable(binding, signal, async () => {
+            const result = await device.controlTransferOut(setup, webUsbBytes(bytes));
+            if (result.status !== "ok") throw new Error(`USB control write failed: ${result.status}.`);
+            if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB control write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
+          }, assertUsable);
+        },
+        reset: async (signal) => {
+          await ensureReady(signal);
+          await runUsbAbortable(binding, signal, () => device.reset(), assertUsable);
+        },
+        connected: () => !released && stillAttached(),
+      };
+      return {
+        transport: controlInterface === undefined ? transport : cdcSerialTransport(transport, controlInterface),
+        identity: entry.stableIdentity ?? undefined,
+        generation,
+        release: async () => {
+          if (released) return;
+          await settleWithin(endLease(), usbAcquisitionLimits.closeGraceMs);
+        },
+      };
+    } catch (error) {
+      const usbCleanup = endLease();
+      if (acquisitionSignal.aborted) {
+        // The caller is done now. It can still report honestly when the
+        // browser answers and the abandoned reservation is safe to give back.
+        throw Object.assign(cancelledError(abortError(acquisitionSignal).message), { cause: error, usbCleanup });
+      }
+      await settleWithin(usbCleanup, usbAcquisitionLimits.closeGraceMs);
+      throw error;
     }
-    const interfaceNumber = selectBorrowInterface(ready.device, requestedInterface);
-    const requireEndpoint = (direction: "in" | "out"): number => {
-      if (interfaceNumber === undefined) throw new Error("This USB protocol needs an explicitly selected transfer interface.");
-      return borrowEndpoint(ready.device, interfaceNumber, direction);
-    };
-    const selectedAlternate = interfaceNumber === undefined ? undefined : ready.device.configuration?.interfaces.find((candidate) => candidate.interfaceNumber === interfaceNumber)?.alternate ?? undefined;
-    const dfu = selectedAlternate?.interfaceClass === 0xfe && selectedAlternate.interfaceSubclass === 0x01 && selectedAlternate.interfaceProtocol === 0x02 && interfaceNumber !== undefined
-      ? { interfaceNumber, alternateSetting: selectedAlternate.alternateSetting, ...(selectedAlternate.interfaceName ? { alternateName: selectedAlternate.interfaceName } : {}) }
-      : undefined;
-    const transport: HardwareTransport = {
-      kind: "usb",
-      interfaceNumber,
-      alternateSetting: selectedAlternate?.alternateSetting,
-      ...(dfu ? { dfu } : {}),
-      read: async (length, timeoutMs, signal) => {
-        if (!Number.isInteger(length) || length <= 0) throw new Error("USB read length must be a positive integer.");
-        await ensureReady();
-        const result = await readUsbQuietly(ready, requireEndpoint("in"), length, timeoutMs, signal);
-        return result.noData ? null : result.value?.data ? viewToBytes(result.value.data) : new Uint8Array(0);
-      },
-      write: async (bytes, signal) => {
-        await ensureReady();
-        await runUsbAbortable(ready, signal, async () => {
-          const result = await ready.device.transferOut(requireEndpoint("out"), webUsbBytes(bytes));
-          if (result.status !== "ok") throw new Error(`USB bulk write failed: ${result.status}.`);
-          if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB bulk write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
-        });
-      },
-      controlIn: async (setup, length, signal) => {
-        await ensureReady();
-        const result = await runUsbAbortable(ready, signal, () => ready.device.controlTransferIn(setup, length));
-        return result.data ? viewToBytes(result.data) : new Uint8Array(0);
-      },
-      controlOut: async (setup, bytes, signal) => {
-        await ensureReady();
-        await runUsbAbortable(ready, signal, async () => {
-          const result = await ready.device.controlTransferOut(setup, webUsbBytes(bytes));
-          if (result.status !== "ok") throw new Error(`USB control write failed: ${result.status}.`);
-          if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB control write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
-        });
-      },
-      reset: async (signal) => {
-        await ensureReady();
-        await runUsbAbortable(ready, signal, () => ready.device.reset());
-      },
-      connected: () => options.pinConnection ? stillAttached() : ready.device.opened,
-    };
-    let protocolTransport = transport;
-    if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {
-      const control = await cdcControlInterface(ready.device, interfaceNumber);
-      if (!ready.device.configuration?.interfaces.find(iface => iface.interfaceNumber === control)?.claimed) await ready.device.claimInterface(control);
-      protocolTransport = cdcSerialTransport(transport, control);
-    }
-    return {
-      transport: protocolTransport,
-      identity: ready.stableIdentity ?? undefined,
-      release: async () => {
-        if (released) return;
-        released = true;
-        // Do not clear a lost grant's re-pick requirement, or close the replacement a new operation would use.
-        await invalidateUsbEntry(grant.device === ready.device && !grant.needsNewGrant ? grant : ready, "The hardware operation lease ended.");
-        ownership.release();
-      },
-    };
   }
 
   async requestDevice(kind: DeviceKind, bleOptionalServices: readonly string[] = []): Promise<DeviceInfo> {
@@ -1967,15 +2162,17 @@ export class DeviceBridgeConnection implements PageOperationBridge {
 
   async disconnectDevice(id: string): Promise<void> {
     await this.operationManager?.deviceDisconnected(id, "forgotten");
-    const rawLease = deviceLeases.claimForRawOperation(this.sessionId, id);
+    const rawLease = deviceLeases.claimToForget(this.sessionId, id, registeredUsbEntry(id));
     try {
       this.lifecycleUnsubs.get(id)?.();
       this.lifecycleUnsubs.delete(id);
-      await forgetDevice(id);
+      await forgetDevice(id, rawLease);
     } finally {
       rawLease.release();
     }
-    deviceLeases.release(this.sessionId, id);
+    // This id was removed by forgetDevice. Any late work remains reserved
+    // on its native object, even if a picker returns it again under a new id.
+    deviceLeases.releaseGoneDevice(id);
     this.refresh();
   }
 }

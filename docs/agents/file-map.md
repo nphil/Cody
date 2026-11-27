@@ -459,6 +459,10 @@ lib/
                        the ownership gate, the condensed transcript (messages
                        and tool NAMES only), snapshot-only — nothing here
                        blocks on another session's run
+  devices/wireless-tools.ts  the omp and ACP tools for the chat's selected tablet;
+                       no browser bridge, pairing or approval authority
+  devices/wireless-workspace.ts  pinned workspace reads and no-overwrite file
+                       publication for wireless transfer tools
   session-acquire.ts   a chat's live engine session for work nobody is typing
                        for (scheduled messages, run recovery): reuses a live
                        child or starts one exactly as POST /api/agent/[id]
@@ -549,6 +553,9 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
+  devices/WirelessCard.tsx  Android wireless pairing, status, reconnect and forget
+  devices/WirelessRootRequests.tsx  page-only approval of one exact Android command
+  devices/WirelessShell.tsx  the chat owner's manual Android command and result
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
@@ -764,6 +771,7 @@ hooks/
   useSettingsHistory.ts    mirrors the phone stack's depth into browser history
                            so a back gesture pops exactly one level
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
+  useWirelessAdb.ts        chat-bound wireless polling and user actions via lib/devices/wireless-browser.ts
   useHelperChoices.ts      models + roles feeding the Helper agents dropdowns (Settings and the helper window)
   claude-credits-notices.ts  the pure decisions behind the "plan limit -> API credits"
                            chat notices: which event is the switch, what silences the

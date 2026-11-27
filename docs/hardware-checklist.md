@@ -434,6 +434,28 @@ Boot drive (emulator-tested only; changes what the unit may start from, so it ne
   pulled it ends at its timeout; Cancel ends it at once, also while the browser
   is still opening the device.
 
+### Wireless ADB from the Cody server (Android 11+)
+
+Field checks require the owner's permission. Use the tablet's **Developer
+options → Wireless debugging**, not the legacy USB-to-TCP command above.
+Do not paste pairing codes into a chat, issue, screenshot or test report.
+
+- [ ] **UNVERIFIED on hardware:** with USB unplugged and no PC ADB daemon,
+  choose **Pair device with pairing code** on the tablet. Enter its pairing
+  address and six-digit code in Cody's private pairing form. The **connection**
+  port on the main Wireless debugging screen differs from the **pairing** port.
+  Read the tablet model and Android version without asking for root.
+- [ ] **UNVERIFIED on hardware:** close the pairing browser. Reconnect from
+  the same authorized chat and repeat a read without another pairing code.
+  Toggle Wireless debugging off/on; if the system changes the connection
+  port, use the current one. No previous command or transfer may replay.
+- [ ] **UNVERIFIED on hardware:** deny a request for Magisk `id`; no elevated
+  command runs. Approve a fresh `id` request and verify it reports UID 0.
+  Next, run ordinary `id` again: it must report shell, not root.
+- [ ] **UNVERIFIED on hardware:** disconnect, then forget the pairing in
+  Cody. Later access must fail until the owner pairs again. Android's
+  **Paired devices → Forget** removes the tablet's side of the trust.
+
 ### ADB port forward and reverse
 
 Use a recoverable, non-critical device and a throwaway service on each side

@@ -7,6 +7,7 @@ import { MAX_SEND_DELAY_SECONDS } from "./protocol";
 import { parseDeviceSpec, parseHostSpec } from "./tunnel";
 import { SET_NAME_RULE, usableSetName } from "./set-name";
 import type { DeviceOperationRequest, DeviceOperationSnapshot } from "./operations";
+import { describeEvidence } from "./operation-evidence";
 import { DEVICE_ARTIFACT_TOOLS } from "./artifact-tools";
 import { DEVICE_ARTIFACT_INPUT_TOOLS } from "./artifact-input-tools";
 import type { DeviceToolContext } from "./tools";
@@ -177,8 +178,9 @@ function describeSnapshot(snapshot: DeviceOperationSnapshot): string {
   }
   if (snapshot.countdown) {
     const { binding, startedAt, releaseAt } = snapshot.countdown;
-    lines.push(`Counting down to ${binding.action} on ${binding.target}: it is sent ${Math.round((releaseAt - startedAt) / 1000)} s after the countdown started unless the user cancels it or the device changes. Nothing has been sent yet.`);
+    lines.push(`Counting down to ${binding.action} on ${binding.target}: it is sent ${Math.round((releaseAt - startedAt) / 1000)} s after the countdown started unless the user cancels it or the device changes. The scheduled command has not been sent yet.`);
   }
+  lines.push(...describeEvidence(snapshot));
   if (snapshot.error) lines.push(`Error: ${snapshot.error}`);
   if (snapshot.result) lines.push(`Result: ${snapshot.result.summary}`);
   for (const output of snapshot.output.slice(-20)) lines.push(output.line);

@@ -4,6 +4,7 @@ import { Cable } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useI18n } from "@/lib/i18n";
 import { useDeviceBridge, type UseDeviceBridgeResult } from "@/hooks/useDeviceBridge";
+import { useWirelessAdb } from "@/hooks/useWirelessAdb";
 import { activityView, groupActivity, planBefore, quietUntil } from "@/lib/devices/activity-groups";
 import { jobArtifactIds, SERIES_LINGER_MS, type Job } from "@/lib/devices/jobs";
 import type { DeviceOperationSnapshot } from "@/lib/devices/operations";
@@ -16,6 +17,8 @@ import { DeviceCard } from "@/components/devices/DeviceCard";
 import { useAcknowledged, useNow } from "@/components/devices/hooks";
 import { isTerminalState, useOperations } from "@/components/devices/OperationList";
 import { Notice, sectionHeadingStyle } from "@/components/devices/ui";
+import { WirelessCard } from "@/components/devices/WirelessCard";
+import { WirelessRootRequests } from "@/components/devices/WirelessRootRequests";
 import { useArtifacts } from "@/components/devices/useArtifacts";
 
 export interface DevicePanelProps {
@@ -59,6 +62,8 @@ export function DevicePanelView({ sessionId, capabilities, devices, activity, at
   const operations = useOperations(operationManager);
   const library = useArtifacts(sessionId);
   const { acknowledged, acknowledge } = useAcknowledged(sessionId);
+  // Wireless ADB is the server's, not the browser's: it needs no USB device and works with the bridge detached.
+  const wireless = useWirelessAdb(sessionId);
   const [selectedInputId, setSelectedInputId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailSubject | null>(null);
   const [reveal, setReveal] = useState<RevealRequest | undefined>(undefined);
@@ -150,10 +155,20 @@ export function DevicePanelView({ sessionId, capabilities, devices, activity, at
         {attached ? t("devices.bridgeConnected") : t("devices.bridgeReconnecting")}
       </div>
 
+      <WirelessRootRequests
+        requests={wireless.snapshot?.rootRequests ?? []}
+        busy={wireless.busy !== null}
+        error={wireless.actionError?.action === "root"
+          ? wireless.actionError.code === "secure_context_required" ? t("devices.wirelessSecurePage") : wireless.actionError.message
+          : undefined}
+        onAnswer={(requestId, decision) => void wireless.answerRoot(requestId, decision)}
+      />
       <NeedsYou items={view.needsYou} ctx={ctx} />
       <LiveJobs jobs={view.live} ctx={ctx} />
 
       <ConnectCard capabilities={capabilities} connect={connect} compact={devices.length > 0} />
+      {/* Keyed on the chat: the form, a half-typed address and the "finish on the tablet" note never survive a switch. */}
+      <WirelessCard key={sessionId} wireless={wireless} />
 
       <section aria-label={t("devices.yourDevices")} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <h3 style={sectionHeadingStyle}>{t("devices.yourDevices")}</h3>
