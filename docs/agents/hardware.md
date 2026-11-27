@@ -445,6 +445,12 @@ of the tablet to the host. Cody's session and approval controls apply to
 its device integration; they are not an OS sandbox against a process with
 the server user's file and process privileges.
 
+Reconnect distinguishes the ADB host's exact authentication and connection
+failure replies, an unready or unsupported ADB connection, and a failed
+read-only identity check. It never shows native output. These failures keep
+the pairing and allow reconnect. Only missing or invalid saved credentials
+or a different valid GUID at the saved address enter `needs-pairing`.
+
 #### Supported protocol boundaries
 
 - **ESP serial/SPI:** `detect`, `dump`, and verified `flash` are supported

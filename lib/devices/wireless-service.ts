@@ -185,6 +185,12 @@ function transportFailure(error: unknown, phase: "pair" | "connect" | "command")
     case "busy": case "limit": return new WirelessServiceError("busy", "Wireless ADB is busy. Try again shortly.", 429);
     case "cancelled": return new WirelessServiceError("cancelled", "The wireless ADB request was cancelled.");
     case "not_found": return new WirelessServiceError("needs_pairing", "Cody no longer has a pairing for this tablet. Forget it here and pair again.");
+    case "connection_authentication_failed": return new WirelessServiceError(code, "The ADB connection failed authentication. Check that Cody is still listed under Paired devices on Android.", 503);
+    case "connection_not_established": return new WirelessServiceError(code, "Cody reached the address, but the encrypted ADB connection did not finish opening. Keep Wireless debugging on and try reconnecting.", 503);
+    case "connection_rejected": return new WirelessServiceError(code, "Cody’s ADB program reported that the encrypted connection failed. Check the connection address on Android’s main Wireless debugging screen.", 503);
+    case "transport_not_ready": return new WirelessServiceError(code, "Android’s ADB connection was not ready. Keep Wireless debugging on and try reconnecting.", 503);
+    case "transport_unsupported": return new WirelessServiceError(code, "Android’s ADB connection does not support the shell protocol Cody needs to check the tablet’s identity.", 503);
+    case "guid_check_failed": return new WirelessServiceError(code, "Cody could not read the tablet’s paired identity. Keep Wireless debugging on and try reconnecting.", 503);
     case "identity_mismatch": return new WirelessServiceError("identity_mismatch", "That address did not identify the paired tablet. Check its Wireless debugging address.");
     case "output_limit": return new WirelessServiceError("output_limit", "Android returned more than the allowed amount of data. Ask for a smaller result.", 413);
     default:

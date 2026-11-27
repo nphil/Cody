@@ -296,6 +296,7 @@ export class WirelessTransport {
     const signal = deadline(CONNECT_MS, source);
     let daemon: Daemon | undefined;
     let accepted = false;
+    let failureCode: WirelessTransportError["code"] = "connection_failed";
     try {
       checkAbort(signal, source);
       const { root, dir } = this.scopeDir(scope);
@@ -315,15 +316,23 @@ export class WirelessTransport {
       const candidate = await startDaemon(this.options.binary ?? ADB, home, pairingId, { connect: address }, signal);
       daemon = candidate;
       const connected = await query(candidate.path, `host:connect:${address}`, signal);
-      if (connected !== `connected to ${address}`) throw new WirelessTransportError("connection_failed");
+      if (connected === `failed to authenticate to ${address}`) throw new WirelessTransportError("connection_authentication_failed");
+      if (connected === `failed to connect to ${address}`) throw new WirelessTransportError("connection_not_established");
+      if (connected !== `connected to ${address}`) throw new WirelessTransportError("connection_rejected");
+      failureCode = "transport_not_ready";
       const id = deviceId(await query(candidate.path, "host:devices-l", signal), address);
-      if (!id) throw new WirelessTransportError("connection_failed");
+      if (!id) throw new WirelessTransportError("transport_not_ready");
+      const features = await query(candidate.path, `host-transport-id:${id}:features`, signal);
+      if (!features.split(",").includes("shell_v2")) throw new WirelessTransportError("transport_unsupported");
+      failureCode = "guid_check_failed";
       // Pairing authenticates the GUID, not adbd's unrelated transient TLS cert.
       // This compares the same device-reported value over the exact live transport.
       const probe = await shell(candidate.path, id, "/system/bin/getprop persist.adb.wifi.guid", { maxOutputBytes: 256 }, signal);
-      if (probe.exitCode !== 0 || probe.stdout.toString("utf8").trimEnd() !== guid) throw new WirelessTransportError("identity_mismatch");
+      const reportedGuid = probe.stdout.toString("utf8").trimEnd();
+      if (probe.exitCode !== 0 || !GUID.test(reportedGuid)) throw new WirelessTransportError("guid_check_failed");
+      if (reportedGuid !== guid) throw new WirelessTransportError("identity_mismatch");
       checkAbort(signal, source);
-      if (candidate.closed.aborted) throw new WirelessTransportError("connection_failed");
+      if (candidate.closed.aborted) throw new WirelessTransportError("transport_not_ready");
       const close = async () => {
         try { await candidate.close(); } finally { release(); }
       };
@@ -371,7 +380,7 @@ export class WirelessTransport {
     } catch (error) {
       checkAbort(signal, source);
       if (error instanceof WirelessTransportError && error.code !== "connection_lost" && error.code !== "output_limit") throw error;
-      throw new WirelessTransportError("connection_failed");
+      throw new WirelessTransportError(failureCode);
     } finally {
       if (!accepted) await daemon?.close();
     }
