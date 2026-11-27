@@ -21,7 +21,7 @@ function isUsableTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function promptTokensFrom(message: AssistantMessage): number | null {
+function promptTokensFrom(message: Pick<AssistantMessage, "usage" | "contextSnapshot">): number | null {
   const snapshotTokens = message.contextSnapshot?.promptTokens;
   if (isUsableTokenCount(snapshotTokens)) return snapshotTokens;
 
@@ -39,10 +39,16 @@ function promptTokensFrom(message: AssistantMessage): number | null {
   return Number.isFinite(total) ? Math.max(0, total) : null;
 }
 
+/**
+ * The context fill of the newest assistant turn. `fallbackUsage` stands in for
+ * the newest turn when `messages` holds none (a windowed transcript that only
+ * holds older pages, or only live tool traffic): the server's `latestAssistant`.
+ */
 export function derivePersistedContextUsage(
   messages: readonly AgentMessage[],
   activeModel: ActiveModel | null | undefined,
   modelList: readonly ContextWindowModel[],
+  fallbackUsage?: AssistantMessage["usage"] | null,
 ): ContextUsageValue | null {
   if (!activeModel) return null;
   const model = modelList.find(
@@ -53,7 +59,7 @@ export function derivePersistedContextUsage(
     return null;
   }
 
-  let latestAssistant: AssistantMessage | undefined;
+  let latestAssistant: Pick<AssistantMessage, "usage" | "contextSnapshot"> | undefined;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role === "assistant") {
@@ -61,6 +67,7 @@ export function derivePersistedContextUsage(
       break;
     }
   }
+  if (!latestAssistant && fallbackUsage) latestAssistant = { usage: fallbackUsage };
   if (!latestAssistant) return null;
 
   const tokens = promptTokensFrom(latestAssistant);

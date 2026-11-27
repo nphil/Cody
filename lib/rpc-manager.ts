@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { LiveSubagentFrames } from "./subagent-live-frames";
+import { RecentMessageFrames } from "./live-message-frames";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
@@ -24,7 +25,7 @@ import { readNativeSettings } from "./omp/settings-config";
 import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
 import { linkIsolatedAgentDir } from "./omp/isolated-agent-dir";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
-import { cacheSessionPath, invalidateSessionListCache, readSessionHeader } from "./session-reader";
+import { cacheSessionPath, hasPersistedMessage, invalidateSessionListCache, readPersistedMessage, readSessionHeader } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
 import { PlanKeeper } from "./plan-keeper/keeper";
@@ -1186,7 +1187,12 @@ export class AgentSessionWrapper {
   private readonly liveSubagents = new LiveSubagentFrames<AgentEvent>();
   // The current run's last 8 finished replies and tool results, replayed the
   // same way (see liveMessageFrames); cleared at run start/end and compaction.
-  private recentMessageEnds: AgentEvent[] = [];
+  // Large ones are held only until the session file has them, then read back
+  // from it (see lib/live-message-frames.ts).
+  private readonly recentMessageEnds = new RecentMessageFrames<AgentEvent>({
+    has: (ref, frameBytes) => hasPersistedMessage(this.sessionFile, ref, frameBytes),
+    read: (ref, frameBytes) => readPersistedMessage(this.sessionFile, ref, frameBytes),
+  });
   private pendingRefusalDecision: PendingRefusalRequest | null = null;
   /** omp announces a fallback (`retry_fallback_applied`) a few milliseconds
    *  BEFORE the refusal guard asks about it. Held briefly so a fallback the
@@ -2113,7 +2119,7 @@ export class AgentSessionWrapper {
       case "agent_start":
         this.scratchActivity?.();
         this.streaming = true;
-        this.recentMessageEnds = [];
+        this.recentMessageEnds.clear();
         this.pausedOnWork = false;
         this.lastReplyText = null;
         // The continuation a "Steer now" was waiting for has begun.
@@ -2155,7 +2161,7 @@ export class AgentSessionWrapper {
           break;
         }
         if (event.isTerminal !== false) {
-          this.recentMessageEnds = [];
+          this.recentMessageEnds.clear();
           this.clearSteerInterrupt();
           this.runningToolCalls.clear();
           this.lastTerminalAgentEndAt = Date.now();
@@ -2197,7 +2203,6 @@ export class AgentSessionWrapper {
         this.resolveDeliveryFromMessage(event);
         if (isRecord(event.message) && (event.message.role === "toolResult" || (event.message.role === "assistant" && event.message.stopReason !== "error"))) {
           this.recentMessageEnds.push(event);
-          if (this.recentMessageEnds.length > 8) this.recentMessageEnds.shift();
         }
         const text = assistantReplyText(event as unknown as { type: string; [key: string]: unknown });
         if (text !== null) {
@@ -2319,7 +2324,7 @@ export class AgentSessionWrapper {
         break;
       case "auto_compaction_start":
         this.compacting = true;
-        this.recentMessageEnds = [];
+        this.recentMessageEnds.clear();
         break;
       case "auto_compaction_end":
         this.compacting = false;
@@ -2334,7 +2339,7 @@ export class AgentSessionWrapper {
         // asked for (a typed command, an extension's ctx.compact()). It holds
         // the session busy like the `compact` command below does.
         this.compacting = true;
-        this.recentMessageEnds = [];
+        this.recentMessageEnds.clear();
         break;
       case "manual_compaction_end":
         this.compacting = false;
@@ -2465,7 +2470,7 @@ export class AgentSessionWrapper {
     this.pendingUiRequests.clear();
     this.pendingPermissionRequests.clear();
     this.liveSubagents.clear();
-    this.recentMessageEnds = [];
+    this.recentMessageEnds.clear();
     if (hadPending) this.notifyObservers({ type: "cody_ui_requests_cleared" });
     if (!this.clearPendingRefusalDecision()) notifyRunningChange();
   }
@@ -3582,7 +3587,7 @@ export class AgentSessionWrapper {
    * events route to replay to a page that attaches mid-run: they fill the gap
    * between its transcript read and its subscription. */
   liveMessageFrames(): AgentEvent[] {
-    return [...this.recentMessageEnds];
+    return this.recentMessageEnds.snapshot();
   }
 
   /** Evict expired entries, then the oldest ones over the cap — run on every

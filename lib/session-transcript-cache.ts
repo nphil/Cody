@@ -1,12 +1,11 @@
 import type { AgentMessage, SessionTreeNode } from "./types";
 import type { TodoPhase } from "./pi-types";
+import type { UsageTotals } from "./session-usage";
+import type { HistoryPageFields, HistoryStats } from "./session-history-page";
 
 /**
- * Per-session, in-memory transcript cache: the last successfully loaded
- * transcript payload per session id, so switching back to a session already
- * viewed this page load repaints instantly (stale-while-revalidate) instead
- * of sitting on "Loading session…" while the whole transcript is fetched
- * again from scratch.
+ * Per-session, in-memory transcript cache: keep recent history pages so a
+ * session can paint immediately while the browser fetches current data.
  *
  * Module-scoped so it survives AppShell's per-switch `key={sessionKey}`
  * remount of ChatWindow (and the useAgentSession instance inside it) — that
@@ -14,10 +13,8 @@ import type { TodoPhase } from "./pi-types";
  * the cache has to live ABOVE the component that gets torn down and
  * recreated on every switch, not inside it.
  *
- * This is a structural copy of `SessionData` (hooks/useAgentSession.ts)
- * rather than an import of it: lib/ modules do not depend on hooks/, and
- * TypeScript's structural typing makes a `SessionData` value assignable here
- * with no cast needed.
+ * The hook uses this same response type so cached and fresh pages retain
+ * identical cursor, branch and session-wide accounting information.
  *
  * A cache hit is never treated as ground truth by itself — the caller always
  * re-fetches immediately after hydrating from it (stale-while-revalidate)
@@ -35,18 +32,43 @@ export interface CachedSessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
     todoPhases: TodoPhase[];
-  };
+    goal?: unknown;
+  } & Partial<HistoryPageFields>;
+  historyStats?: HistoryStats;
+  planOverlay?: unknown;
+  modelUsage?: UsageTotals;
 }
 
 interface CacheEntry {
   data: CachedSessionData;
   cachedAt: number;
+  weight: number;
 }
 
-// Bounded small: an entry can hold a full transcript (megabytes for a long
-// session), and this is a raw in-memory Map with no eviction pressure other
-// than this cap — unlike the server-side (path, size, mtime) caches, there is
-// no natural upper bound from disk here.
+// Charge the entire JSON-shaped payload (including metadata and arrays), not
+// just visible text. This estimates retention, not the VM's exact heap size.
+const MAX_CACHE_WEIGHT = 4 * 1024 * 1024;
+let cacheWeight = 0;
+
+function payloadWeight(value: unknown, remaining: number, depth = 0): number {
+  if (typeof value === "string") return 24 + 2 * value.length;
+  if (value === null || typeof value !== "object") return 8;
+  if (depth > 64) return Infinity;
+  let weight = 48;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length && weight <= remaining; i++) {
+      weight += 8 + payloadWeight(value[i], remaining - weight, depth + 1);
+    }
+    return weight;
+  }
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    weight += 16 + 2 * key.length;
+    weight += payloadWeight((value as Record<string, unknown>)[key], remaining - weight, depth + 1);
+    if (weight > remaining) break;
+  }
+  return weight;
+}
 const MAX_CACHED_SESSIONS = 12;
 
 // Long enough to help a quick back-and-forth between a handful of sessions;
@@ -73,20 +95,25 @@ export function getCachedSessionData(sessionId: string, now: number = Date.now()
  * entry. Every cache hit is immediately followed by a revalidating fetch, so
  * "recency" only needs to track successful writes, not reads. */
 export function setCachedSessionData(sessionId: string, data: CachedSessionData, now: number = Date.now()): void {
-  cache.delete(sessionId);
-  cache.set(sessionId, { data, cachedAt: now });
-  while (cache.size > MAX_CACHED_SESSIONS) {
+  clearCachedSessionData(sessionId);
+  const weight = payloadWeight(data, MAX_CACHE_WEIGHT);
+  if (weight > MAX_CACHE_WEIGHT) return;
+  cache.set(sessionId, { data, cachedAt: now, weight });
+  cacheWeight += weight;
+  while (cacheWeight > MAX_CACHE_WEIGHT || cache.size > MAX_CACHED_SESSIONS) {
     const oldestKey = cache.keys().next().value;
     if (oldestKey === undefined) break;
-    cache.delete(oldestKey);
+    clearCachedSessionData(oldestKey);
   }
 }
 
 export function clearCachedSessionData(sessionId: string): void {
+  cacheWeight -= cache.get(sessionId)?.weight ?? 0;
   cache.delete(sessionId);
 }
 
 /** Test-only: drop every entry so tests never leak state into each other. */
 export function __resetSessionTranscriptCacheForTests(): void {
   cache.clear();
+  cacheWeight = 0;
 }

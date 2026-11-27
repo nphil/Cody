@@ -20,9 +20,10 @@ import {
   buildSessionContext,
   listSupersededCopies,
   loadSessionFileCached,
+  loadSessionForHistoryPage,
   readSessionHeader,
 } from "@/lib/session-reader";
-import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { apiErrorResponse, historyCursorGone, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession, removeDeletedSessionScratch } from "@/lib/rpc-manager";
 import { forgetSession } from "@/lib/auth/session-owners";
@@ -33,12 +34,12 @@ import { forgetSessionLocalRouting } from "@/lib/local-model-routing";
 import { forgetSessionPreset } from "@/lib/model-presets/overlay";
 import { forgetSessionToolsets } from "@/lib/omp/on-demand-chats";
 import { removeSessionItems } from "@/lib/scheduled/store";
-import { engineCrashRow, withEngineCrashRows } from "@/lib/engine-crash";
-import { readEngineCrashes } from "@/lib/engine-crash-log";
+import { readEngineMessages, withCrashRows } from "@/lib/engine-transcript";
 import { applyPlanOverlay } from "@/lib/plan-keeper/fold";
 import { readPlanOverlay } from "@/lib/plan-keeper/overlay";
 import { aggregateModelUsage, usageTokenTotal } from "@/lib/session-usage";
-import type { AgentMessage } from "@/lib/types";
+import { computeHistoryStats, HISTORY_FIRST_MESSAGE_PREVIEW_CHARS, pageSessionContext, parseHistoryPage, slimTreeForPage, type HistoryPageFields, type HistoryPageRequest } from "@/lib/session-history-page";
+import type { SessionContext } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -165,19 +166,9 @@ async function engineSessionResponse(
   id: string,
   row: EngineSessionRow,
   includeState: boolean,
+  page: HistoryPageRequest | null,
 ): Promise<NextResponse> {
-  const rpc = getRpcSession(id);
-  const alive = rpc?.isAlive() ? rpc : null;
-
-  let messages: AgentMessage[] = [];
-  if (alive) {
-    try {
-      const result = await alive.send({ type: "get_messages" }) as { messages?: AgentMessage[] } | null;
-      messages = result?.messages ?? [];
-    } catch {
-      // Leave the transcript empty; the live event stream still drives the UI.
-    }
-  }
+  const { messages, alive } = await readEngineMessages(id);
 
   let agent: { running: boolean; state?: unknown } | undefined;
   if (includeState) {
@@ -190,6 +181,25 @@ async function engineSessionResponse(
     } else {
       agent = { running: false };
     }
+  }
+
+  const fullContext: SessionContext = {
+    messages,
+    // Entry ids are omp session-file entry ids; a turn-based engine has none,
+    // and the client already tolerates a short/empty array (it only feeds
+    // omp-only affordances like forking and deferred thinking).
+    entryIds: [],
+    thinkingLevel: "off",
+    model: null,
+    todoPhases: [],
+  };
+  // A paged window of an engine transcript is cursored by message index
+  // (`m:<n>`): the turn log is append-only, so an index never moves.
+  let context: SessionContext & Partial<HistoryPageFields> = fullContext;
+  if (page) {
+    const paged = pageSessionContext(fullContext, page, { engine: true });
+    if ("error" in paged) return historyCursorGone();
+    context = paged.context;
   }
 
   return NextResponse.json({
@@ -208,24 +218,10 @@ async function engineSessionResponse(
     },
     leafId: null,
     tree: [],
-    context: {
-      messages,
-      // Entry ids are omp session-file entry ids; a turn-based engine has none,
-      // and the client already tolerates a short/empty array (it only feeds
-      // omp-only affordances like forking and deferred thinking).
-      entryIds: [],
-      thinkingLevel: "off",
-      model: null,
-      todoPhases: [],
-    },
+    context,
+    ...(page ? { historyStats: computeHistoryStats(messages) } : {}),
     ...(agent ? { agent } : {}),
   });
-}
-
-/** The persistent lines engine crashes left in this chat (lib/engine-crash-log.ts), laid among the messages by time. */
-function withCrashRows<C extends { messages: AgentMessage[]; entryIds: string[] }>(sessionId: string, context: C): C {
-  const merged = withEngineCrashRows<AgentMessage>(context.messages, context.entryIds, readEngineCrashes(sessionId), engineCrashRow);
-  return merged.messages === context.messages ? context : { ...context, ...merged };
 }
 
 export async function GET(
@@ -234,25 +230,38 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
+    const searchParams = new URL(req.url).searchParams;
+    // ?page=1 returns a window of the branch plus cursors (lib/session-history-page.ts);
+    // without it the response is the whole branch, as before.
+    const parsedPage = parseHistoryPage(searchParams);
+    if ("error" in parsedPage) {
+      return NextResponse.json({ error: parsedPage.error.message, code: parsedPage.error.code }, { status: 400 });
+    }
+    const page = parsedPage.page;
+
     if (getHarness().createSession) {
       const engine = resolveEngineSessionOr404(id, req);
       if ("response" in engine) return engine.response;
-      return await engineSessionResponse(id, engine.row, new URL(req.url).searchParams.has("includeState"));
+      return await engineSessionResponse(id, engine.row, searchParams.has("includeState"), page);
     }
 
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 
-    const searchParams = new URL(req.url).searchParams;
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const includeState = searchParams.has("includeState");
 
-    const { header, entries, error: loadError } = loadSessionFileCached(filePath, {
-      resolveBlobs: true,
-      skipToolResultImages: deferToolResultImages,
-    });
+    // A page the client asks for with deferMedia reads the history-page parse:
+    // the same entries minus the engine-only fields no page carries, which keeps
+    // a 150 MB chat inside the parse cache (lib/session-reader.ts).
+    const { header, entries, error: loadError } = page && deferToolResultImages
+      ? loadSessionForHistoryPage(filePath)
+      : loadSessionFileCached(filePath, {
+        resolveBlobs: true,
+        skipToolResultImages: deferToolResultImages,
+      });
     if (loadError === "too_large") {
       return NextResponse.json(
         { error: "Session file is too large to open in Cody", code: "session_file_too_large" },
@@ -263,10 +272,15 @@ export async function GET(
       return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
     }
     const leafId = resolveSessionLeafId(entries);
-    const tree = projectTreeForResponse(buildSessionTree(entries));
+    const projectedTree = projectTreeForResponse(buildSessionTree(entries));
+    const tree = page ? slimTreeForPage(projectedTree, leafId) : projectedTree;
     const context = buildSessionContext(entries, leafId, {
       deferThinking,
       deferToolResultImages,
+      // Only a paged response may stub oversized blocks: the page client
+      // fetches them on demand (/detail?entryId=...); a legacy
+      // consumer would render the stub as the whole text.
+      ...(page ? { deferOversizedBlocks: true } : {}),
       toolResultImageUrl: (entryId, index) =>
         `/api/sessions/${encodeURIComponent(id)}/media?entryId=${encodeURIComponent(entryId)}&index=${index}`,
     });
@@ -284,13 +298,15 @@ export async function GET(
       created: header.timestamp,
       modified,
       messageCount: context.messages.length,
-      firstMessage: context.messages.find((m) => m.role === "user")
-        ? (() => {
-            const msg = context.messages.find((m) => m.role === "user")!;
-            const c = (msg as { content: unknown }).content;
-            return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
-          })()
-        : "(no messages)",
+      // A paged response sends only a preview: the first prompt can be megabytes
+      // and sits outside the window, and no client reads more than a line of it.
+      firstMessage: (() => {
+        const first = context.messages.find((m) => m.role === "user");
+        if (!first) return "(no messages)";
+        const c = (first as { content: unknown }).content;
+        const text = typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
+        return page ? text.slice(0, HISTORY_FIRST_MESSAGE_PREVIEW_CHARS) : text;
+      })(),
       parentSessionId,
     };
 
@@ -321,13 +337,22 @@ export async function GET(
     // chat, so the client cannot sum them from `context.messages`. Left out
     // when there are none, so an ordinary chat's payload does not change.
     const modelUsage = aggregateModelUsage(entries);
+    const fullContext = withCrashRows(id, { ...context, todoPhases: applyPlanOverlay(context.todoPhases, planOverlay) });
+    let responseContext: typeof fullContext & Partial<HistoryPageFields> = fullContext;
+    if (page) {
+      const paged = pageSessionContext(fullContext, page);
+      if ("error" in paged) return historyCursorGone();
+      responseContext = paged.context;
+    }
     return NextResponse.json({
       sessionId: id,
       filePath,
       info,
       leafId,
       tree,
-      context: withCrashRows(id, { ...context, todoPhases: applyPlanOverlay(context.todoPhases, planOverlay) }),
+      context: responseContext,
+      // The whole branch's totals, because `context.messages` is only a window.
+      ...(page ? { historyStats: computeHistoryStats(fullContext.messages) } : {}),
       ...(planOverlay ? { planOverlay } : {}),
       ...(usageTokenTotal(modelUsage) > 0 || modelUsage.cost > 0 ? { modelUsage } : {}),
       ...(agent ? { agent } : {}),

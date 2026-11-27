@@ -587,7 +587,7 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions/<id>/subagents/<subagentId>` | GET | one subagent's transcript, read by byte range (never the whole file): `?tail=1` newest page, `?beforeByte=N` the page before offset N, `?fromByte=N` the page from offset N; `?mode=completion` the final output |
 | `/api/sessions/<id>/btw` | GET | side-question (`/btw`) topics, newest first; never starts an engine (omp only) |
 | `/api/sessions/<id>/media` | GET | attachments referenced by the transcript |
-| `/api/sessions/<id>/entries/<entryId>/thinking` | GET | expanded reasoning for one entry |
+| `/api/sessions/<id>/detail` | GET | one 64 KiB page of an oversized thinking / tool-result / tool-argument text: `?entryId=&kind=thinking\|result\|arg&blockIndex=` (+ `&pointer=` for `arg`, `&page=`, `&limit=`); returns `{text, page, pages, total}`; `Cache-Control: private, no-store` |
 | `/api/sessions/<id>/archive` | POST | archive the session and its artifacts, and the earlier copies its row stands in for |
 | `/api/sessions/import` | POST | `{fileName, content}` (≤10 MB); the imported session becomes yours |
 

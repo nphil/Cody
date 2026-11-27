@@ -108,7 +108,7 @@ session:
   switches into a running chat lost a message until the next reload. The
   `/subagents` usage route no longer parses the parent file.
 - **Client: stale-while-revalidate across switches.**
-  `lib/session-transcript-cache.ts` (12 sessions, 15 min) lives above the
+  `lib/session-transcript-cache.ts` (12 sessions, 15 min, **4 MiB estimated total**; oversized entries bypass caching) lives above the
   per-switch remount, so a revisited session paints before any request
   (2.4–3.0 s → ~0.45 s) and then refreshes. Deleting a session clears its
   entry.
@@ -173,6 +173,64 @@ session:
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
+
+### The open chat is a bounded window, not the whole transcript
+- `useAgentSession` holds ONE `historyWindow` (messages + parallel entry ids +
+  `HistoryMeta`), shaped by the pure `lib/chat-history-window.ts`. A response
+  with `page=1` (`GET /api/sessions/[id]`, `/context`) is the newest page plus
+  `olderCursor`/`newerCursor`/`totalMessages`; the cache stores only that tail.
+  Sidebar chats (`sessionKind: "sidebar"`) stay legacy full responses.
+- Caps: 300 messages / 6 MiB (`WINDOW_MAX_*`); past them the end farthest from
+  the reader is trimmed to 75%, never inside 12 messages of the reader anchor
+  (`enforceWindow`). Trimmed ends keep a cursor, so nothing is lost silently:
+  "Show earlier messages" (top) and "Show newer messages" (bottom) walk back.
+- A window with a `newerCursor` is **detached** from the live end. It never
+  counts as "following", holds no live-only messages (live delivery sets
+  `liveAhead`), hides the streaming bubble and shows the "Jump to latest"
+  pill. Sending a message first calls `returnToLive()` (fresh tail, forced);
+  if that fails nothing is sent.
+- A reload (terminal/reconcile `loadSession`) while reading merges the fresh
+  tail into the window (`mergeTail`) instead of replacing it; a detached
+  window is left where it is. Mount/retry/fork/rewind/compaction/"Jump to
+  latest" take the tail wholesale (new epoch: reader anchor, in-flight pages
+  and statuses of the old window are void).
+- Live-only messages (no entry id, so unaddressable) are bounded by a
+  coalesced tail re-read once more than 64 exist or they retain over 1 MiB
+  (`liveOnlyUnderPressure`; a few huge outputs count): one request at a time,
+  fenced on the run, kept live messages preserved, backoff on failure. A
+  viewed branch is display-only and is left out of this (its tail is not the
+  session's).
+- A navigated branch is keyed by the window's epoch (`branchLeafRef`), so a
+  replaced window can never page the wrong branch. "Jump to latest" and the
+  send-time return reload the viewed branch itself (never switching branch);
+  the session's own leaf takes over at the run's terminal reload, as before.
+  Branch navigation adopts that branch's `historyStats` (counts, usage, latest turn).
+- Page requests carry the window's `epoch` and cursor; an answer for a window
+  that changed meanwhile is dropped. HTTP 410 (cursor no longer on the
+  branch) reloads the latest. Whole-chat figures (stats, per-model usage,
+  context fill) come from the server's `historyStats`, plus live-only messages.
+
+### Oversized persisted blocks load on request
+- A persisted thinking block, a tool-result text or a tool-call argument string
+  over 16 KiB reaches the page as a 1 KiB preview plus its length
+  (`projectLazyBlocks` in `lib/lazy-blocks.ts`, switched on by
+  `deferOversizedBlocks` for the first history page). Results are stubbed only
+  when, on the oldest-first walk, they pair with a generic call (a bash call
+  that is one simple command keeps its command line whole but its output is
+  stubbed); `ask`, HomeLabber approvals, MCP tool commands, results carrying
+  the engine's `toolCommands` record, unpaired results, `bashExecution`
+  output, diffs and every other field arrive whole and untouched. The rest is
+  read from `GET /api/sessions/[id]/detail?entryId=...` (shallow on purpose; same session
+  gate as every session route; it reads the DISPLAYED UI message from
+  `entryToUiMessage`, never raw or engine-only data; kinds thinking / result /
+  arg only) when the reader opens the thinking box or clicks "Show full".
+  There is no size cap: text is split into 64 KiB pages (`sliceLazyPage`,
+  cuts never split a surrogate pair), and `LazyDetailText` shows ONE page at a
+  time with First / Previous / Next / Last and a Retry for any failed read
+  (the first included). The page state machine is `lib/lazy-pager.ts`; it
+  aborts the request in flight and drops the text when the card collapses,
+  the viewer is hidden or the row unmounts. There is no module cache. Live
+  (streamed) messages are never stubbed.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.

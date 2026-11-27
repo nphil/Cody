@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer, type SetStateAction } from "react";
 import type {
   AgentMessage,
   CustomMessage,
@@ -133,7 +133,19 @@ import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
 import { LiveToolOutputStore, partialResultText, tailLines } from "@/lib/live-tool-output";
 import { addUsageTotals, aggregateMessageUsage, countEditRejections, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
-import { getCachedSessionData, setCachedSessionData } from "@/lib/session-transcript-cache";
+import { getCachedSessionData, setCachedSessionData, type CachedSessionData } from "@/lib/session-transcript-cache";
+import {
+  appendPage,
+  emptyWindow,
+  enforceWindow,
+  isDetached,
+  mergeTail,
+  liveOnlyUnderPressure,
+  prependPage,
+  windowFromContext,
+  type HistoryWindow,
+  type WindowContext,
+} from "@/lib/chat-history-window";
 import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptAnchor } from "@/lib/transcript-anchor";
 import {
   activityFromProgressChange,
@@ -151,28 +163,45 @@ import {
 // history module); keep the export path stable for components.
 export type { SubagentInfo } from "@/lib/subagent-types";
 
-export interface SessionData {
-  sessionId: string;
-  filePath: string;
-  tree: SessionTreeNode[];
-  leafId: string | null;
-  context: {
-    messages: AgentMessage[];
-    entryIds: string[];
-    thinkingLevel: string;
-    model: { provider: string; modelId: string } | null;
-    todoPhases: TodoPhase[];
-    /** The goal the session file leaves it in (lib/goal-state.ts), read when no engine is running. */
-    goal?: unknown;
-  };
-  /** The plan keeper's overlay for this chat (lib/plan-keeper/overlay.ts), so a
-   * chat with no engine running still shows its labels and summaries. Absent
-   * when the keeper never touched it. */
-  planOverlay?: unknown;
-  /** Spend omp recorded as `model_usage` entries (a late response, a discarded
-   * turn, a cache refresh, a helper call): billed, but in no message. Summed
-   * by the server (lib/session-usage.ts); absent when there is none. */
-  modelUsage?: UsageTotals;
+/** One server transcript answer: the tail window (or, on a legacy full response, every message). One type with the cache so a cached and a fresh page cannot drift. */
+export type SessionData = CachedSessionData;
+
+/** Pacing of the live-only backlog's tail re-read (thresholds: `liveOnlyUnderPressure`). */
+const LIVE_ONLY_REHYDRATE_MIN_GAP_MS = 2_000;
+const LIVE_ONLY_REHYDRATE_BACKOFF_MS = 15_000;
+
+const NO_MESSAGES: AgentMessage[] = [];
+const NO_ENTRY_IDS: string[] = [];
+
+/**
+ * The session record the hook keeps beside the window (model, file, stats,
+ * tree) WITHOUT the response's messages: the window is the one bounded copy of
+ * the transcript, so a page the window later trims or replaces is not kept
+ * alive here.
+ */
+function withoutTranscript(data: SessionData): SessionData {
+  return { ...data, context: { ...data.context, messages: NO_MESSAGES, entryIds: NO_ENTRY_IDS } };
+}
+
+/** What the reader is doing: following the live end, or reading the message at `index` (null: not yet known). */
+interface ReaderProbe {
+  following: boolean;
+  index: number | null;
+}
+
+export type HistoryLoadStatus = "idle" | "loading" | "error";
+
+/**
+ * Keep the window within its caps. A reader whose position is not known yet
+ * (not following, no anchor captured) is never trimmed under: only the
+ * detached-window invariant applies. `shiftReader` is how far the window's
+ * head just moved under the reader (a page prepended before their anchor was
+ * re-captured).
+ */
+function settleHistoryWindow(window: HistoryWindow, reader: ReaderProbe, shiftReader = 0): HistoryWindow {
+  if (reader.following) return enforceWindow(window, null);
+  if (reader.index === null) return enforceWindow(window, null, { maxMessages: Infinity, maxBytes: Infinity });
+  return enforceWindow(window, reader.index + shiftReader);
 }
 
 interface StreamingState {
@@ -1245,11 +1274,45 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // getCachedSessionData is a pure lookup (no eviction, no recency bump), so
   // calling it in the render body is safe.
   const initialCachedData = session ? getCachedSessionData(session.id) : undefined;
-  const [data, setData] = useState<SessionData | null>(initialCachedData ?? null);
+  const [data, setData] = useState<SessionData | null>(() => initialCachedData ? withoutTranscript(initialCachedData) : null);
   const [loading, setLoading] = useState(!isNew && initialCachedData === undefined);
   const [error, setError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(initialCachedData?.leafId ?? null);
-  const [messages, setMessages] = useState<AgentMessage[]>(initialCachedData?.context.messages ?? []);
+  // The active chat's bounded working set: ONE state holding the messages, the
+  // entry ids parallel to them and the cursors naming the window's edges, so a
+  // live append and a landing history page are functional updates of the same
+  // value and cannot overwrite each other (lib/chat-history-window.ts).
+  const [historyWindow, setHistoryWindow] = useState<HistoryWindow>(
+    () => (initialCachedData ? windowFromContext(initialCachedData.context, 0) : emptyWindow()),
+  );
+  const messages = historyWindow.messages;
+  const entryIds = historyWindow.entryIds;
+  const historyMeta = historyWindow.meta;
+  const historyWindowRef = useRef(historyWindow);
+  historyWindowRef.current = historyWindow;
+  // What the reader is doing, read inside window updates: following the live
+  // end (null index) or reading the message at `index`. Wired to the scroll
+  // refs below, which are declared after this state.
+  const readerProbeRef = useRef<() => ReaderProbe>(() => ({ following: true, index: null }));
+  const windowEpochRef = useRef(0);
+  /** Same signature as a state setter, for the many live-append sites: every change passes through {@link settleHistoryWindow}. */
+  const setMessages = useCallback((update: SetStateAction<AgentMessage[]>) => {
+    setHistoryWindow((current) => {
+      const next = typeof update === "function" ? update(current.messages) : update;
+      if (next === current.messages) return current;
+      // A selected historical leaf is immutable. Live appends belong to the
+      // engine's own leaf; mixing them into this one both mislabels them and
+      // leaves them with no cursor by which they could be evicted and reloaded.
+      if (branchLeafRef.current?.epoch === current.meta.epoch && next.length > current.meta.persisted) return current;
+      const persisted = Math.min(current.meta.persisted, next.length);
+      const changed: HistoryWindow = {
+        messages: next,
+        entryIds: current.meta.engineStart === null && current.entryIds.length > persisted ? current.entryIds.slice(0, persisted) : current.entryIds,
+        meta: persisted === current.meta.persisted ? current.meta : { ...current.meta, persisted },
+      };
+      return settleHistoryWindow(changed, readerProbeRef.current());
+    });
+  }, []);
   // Latest committed transcript identity, readable from event callbacks that
   // must not re-create per message (the run-end handlers capture it so the
   // follow logic can tell the terminal reload's commit apart from the state
@@ -1259,7 +1322,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // What the stream delivered between a switch's fast attach and its
   // transcript landing (keys, lib/attach-replay.ts): that landing keeps it.
   const fastTailRef = useRef<{ sid: string; delivered: Set<string> } | null>(null);
-  const [entryIds, setEntryIds] = useState<string[]>(initialCachedData?.context.entryIds ?? []);
+  const [olderStatus, setOlderStatus] = useState<HistoryLoadStatus>("idle");
+  const [newerStatus, setNewerStatus] = useState<HistoryLoadStatus>("idle");
+  const olderInFlightRef = useRef(false);
+  const newerInFlightRef = useRef(false);
+  // The branch the window shows when it is not the session's own leaf, keyed by
+  // the window's epoch: a window that was replaced or reloaded has a new
+  // epoch, so a stale entry can never name the wrong branch (no reset to race).
+  const branchLeafRef = useRef<{ epoch: number; leafId: string } | null>(null);
+  // Counts tail windows adopted by loadSession, so "Jump to latest" can tell it landed.
+  const tailAdoptedCountRef = useRef(0);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
@@ -1588,6 +1660,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // identity (lib/transcript-anchor), not by DOM node, so a remount cannot
   // lose it the way browser scroll anchoring does.
   const readerAnchorRef = useRef<TranscriptAnchor | null>(null);
+  readerProbeRef.current = () => ({ following: completionScrollAllowedRef.current, index: readerAnchorRef.current?.turnIndex ?? null });
+  // The reader's anchor names a message by its index in the window. A page
+  // prepended above them, or the head trimmed away, moves every index by the
+  // same amount; apply that to the anchor BEFORE the pin layout effect below
+  // re-asserts it. A replaced window (new epoch) voids the anchor.
+  const anchorShiftSeenRef = useRef({ epoch: historyMeta.epoch, shift: historyMeta.shift });
+  useLayoutEffect(() => {
+    const seen = anchorShiftSeenRef.current;
+    if (seen.epoch !== historyMeta.epoch) {
+      readerAnchorRef.current = null;
+    } else if (seen.shift !== historyMeta.shift && readerAnchorRef.current) {
+      readerAnchorRef.current = { ...readerAnchorRef.current, turnIndex: readerAnchorRef.current.turnIndex + historyMeta.shift - seen.shift };
+    }
+    anchorShiftSeenRef.current = { epoch: historyMeta.epoch, shift: historyMeta.shift };
+  }, [historyMeta.epoch, historyMeta.shift]);
   // The scrollTop our own last instant write landed on. A scroll event at
   // that value is our echo; any other value with no programmatic window open
   // is the user (or the browser's own anchoring) and recomputes `following`.
@@ -1686,13 +1773,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const displayModelId = displayModel?.modelId;
   const persistedContextUsage = useMemo(
     () => derivePersistedContextUsage(
-      messages,
+      // A window away from the live end holds no newest turn: read the
+      // server's account of it instead of an older page's last assistant.
+      historyMeta.newerCursor === null ? messages : NO_MESSAGES,
       displayModelProvider === undefined || displayModelId === undefined
         ? null
         : { provider: displayModelProvider, modelId: displayModelId },
       modelList,
+      data?.historyStats?.latestAssistant?.usage,
     ),
-    [messages, displayModelProvider, displayModelId, modelList],
+    [messages, historyMeta.newerCursor, displayModelProvider, displayModelId, modelList, data?.historyStats?.latestAssistant?.usage],
   );
   const contextUsage = liveContextUsage ?? persistedContextUsage;
 
@@ -1715,18 +1805,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // two errors: it cannot be told apart from real spend.
       return { ...sessionStatsOverride, contextUsage: contextUsage ?? undefined };
     }
-    let userMessages = 0;
-    let assistantMessages = 0;
-    let toolResults = 0;
-    let toolCalls = 0;
-    for (const msg of messages) {
+    // A windowed transcript holds only part of the chat, so whole-chat totals
+    // come from the server's `historyStats` (taken over the full branch when
+    // the window was fetched) plus whatever completed live since: the messages
+    // past `persisted`, which the server's snapshot cannot have counted.
+    const stats = data?.historyStats;
+    const counted = stats ? messages.slice(historyMeta.persisted) : messages;
+    let userMessages = stats?.userMessages ?? 0;
+    let assistantMessages = stats?.assistantMessages ?? 0;
+    let toolResults = stats?.toolResults ?? 0;
+    let toolCalls = stats?.toolCalls ?? 0;
+    for (const msg of counted) {
       if (msg.role === "user") userMessages += 1;
       if (msg.role === "toolResult") toolResults += 1;
       if (msg.role !== "assistant") continue;
       assistantMessages += 1;
       toolCalls += msg.content.filter((c) => c.type === "toolCall").length;
     }
-    const usage = addUsageTotals(aggregateMessageUsage(messages), external, data?.modelUsage ?? emptyUsageTotals());
+    const usage = addUsageTotals(stats?.usage ?? emptyUsageTotals(), aggregateMessageUsage(counted), external, data?.modelUsage ?? emptyUsageTotals());
     const tokens = {
       input: usage.input,
       output: usage.output,
@@ -1734,8 +1830,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cacheWrite: usage.cacheWrite,
       total: usageTokenTotal(usage),
     };
-    if (tokens.total === 0 && messages.length === 0) return null;
-    const editRejections = countEditRejections(messages);
+    const totalMessages = (stats?.totalMessages ?? 0) + counted.length;
+    if (tokens.total === 0 && totalMessages === 0) return null;
+    const editRejections: Record<string, number> = { ...(stats?.editRejections ?? {}) };
+    for (const [reason, count] of Object.entries(countEditRejections(counted))) {
+      editRejections[reason] = (editRejections[reason] ?? 0) + count;
+    }
     return {
       sessionFile: data?.filePath || undefined,
       sessionId: sessionIdRef.current ?? session?.id ?? "",
@@ -1744,7 +1844,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       assistantMessages,
       toolCalls,
       toolResults,
-      totalMessages: messages.length,
+      totalMessages,
       tokens,
       cost: usage.cost,
       // Absent rather than empty when nothing failed (or the engine predates
@@ -1755,7 +1855,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ...(usage.unpricedModels.length > 0 ? { unpricedModels: usage.unpricedModels } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, subagentUsage, engineUsage, contextUsage, data?.filePath, data?.modelUsage, session?.id, session?.name]);
+  }, [messages, historyMeta.persisted, sessionStatsOverride, subagentUsage, engineUsage, contextUsage, data?.filePath, data?.modelUsage, data?.historyStats, session?.id, session?.name]);
 
   // The web-hosted goal below is the FALLBACK for an engine with no native goal
   // mode (older omp, pi, ACP). Keep it scoped to its session so switching
@@ -2175,10 +2275,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const engineNameRef = useRef(opts.engineName ?? "Cody");
   engineNameRef.current = opts.engineName ?? "Cody";
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number, signal?: AbortSignal) => {
+  /**
+   * Load a session's transcript tail (and optionally its live state). A reader
+   * who scrolled into history keeps the pages they loaded (`mergeTail`), and one
+   * who navigated away from the live end is not pulled back; `showLoading`
+   * (a first open or an explicit retry) and `forceWindow` (Jump to latest, a
+   * structural change such as a fork or compaction) take the fresh tail.
+   */
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number, signal?: AbortSignal, forceWindow = false) => {
     if (sessionIdRef.current === sid) setLiveContextUsage(null);
     if (showLoading) setLoading(true);
     const params = new URLSearchParams({ deferMedia: "1" });
+    // Window the transcript: the server answers with the newest page and the
+    // cursors to walk the rest (a side chat is small and shown whole).
+    if (sessionKind !== "sidebar") params.set("page", "1");
     // Thinking text is deferred only when blocks start collapsed. With the
     // show-thinking preference on, a deferred block mounts expanded but
     // EMPTY: the load's pin-to-bottom lands first and per-block fetches
@@ -2221,7 +2331,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         } else if (showLoading) {
           setData(null);
           setActiveLeafId(null);
-          setMessages([]);
+          setHistoryWindow(emptyWindow(++windowEpochRef.current));
           setError(null);
         }
         return null;
@@ -2234,18 +2344,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // the new run's optimistic user bubble).
       if (fenceRunId !== undefined && promptRunIdRef.current !== fenceRunId) return null;
       loadedTranscriptSessionIdRef.current = sid;
-      setData(d);
+      setData(withoutTranscript(d));
       setActiveLeafId(d.leafId);
+      tailAdoptedCountRef.current += 1;
       // Messages a switch's fast attach already received that this
       // transcript, read before they were written, lacks stay.
       const fastTail = fastTailRef.current;
-      if (fastTail?.sid === sid) {
-        fastTailRef.current = null;
-        setMessages((previous) => withDeliveredTail(d.context.messages, previous, fastTail.delivered));
-      } else {
-        setMessages(d.context.messages);
-      }
-      setEntryIds(d.context.entryIds ?? []);
+      const delivered = fastTail?.sid === sid ? fastTail.delivered : null;
+      if (delivered) fastTailRef.current = null;
+      const holdReader = !showLoading && !forceWindow;
+      const tail = windowFromContext(d.context, ++windowEpochRef.current);
+      const reading = !readerProbeRef.current().following;
+      setHistoryWindow((current) => {
+        // A window showing another branch is not comparable with the session's
+        // own tail: that reload takes the tail wholesale, as it always has.
+        const keepReader = holdReader && current.messages.length > 0 && branchLeafRef.current?.epoch !== current.meta.epoch;
+        if (keepReader && isDetached(current)) {
+          // The reader is somewhere in history: leave them there and say live moved on.
+          return { ...current, meta: { ...current.meta, liveAhead: true, totalMessages: tail.meta.totalMessages ?? current.meta.totalMessages } };
+        }
+        let next = keepReader ? mergeTail(current, tail, reading).window : tail;
+        if (delivered) next = { ...next, messages: withDeliveredTail(next.messages, current.messages, delivered) };
+        return settleHistoryWindow(next, readerProbeRef.current());
+      });
       setTodoPhases(d.context.todoPhases ?? []);
       if (d.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(d.planOverlay) ?? null);
       persistedGoal = parseGoalModeState(d.context.goal);
@@ -2339,27 +2460,223 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to load agent state:", e);
       return null;
     }
-  }, [refreshSubagentUsage, adoptFastModeState, adoptGoalState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
+  }, [sessionKind, refreshSubagentUsage, adoptFastModeState, adoptGoalState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
-  const loadContext = useCallback(async (sid: string, leafId: string | null) => {
+  /** Load another branch's newest page and make it the window. Resolves true once it is in place. */
+  const loadContext = useCallback(async (sid: string, leafId: string | null): Promise<boolean> => {
     const seq = ++contextRequestSeqRef.current;
     try {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      if (sessionKind !== "sidebar") params.set("page", "1");
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[]; todoPhases: TodoPhase[] } };
+      const d = await res.json() as { context: WindowContext & { todoPhases: TodoPhase[] }; historyStats?: SessionData["historyStats"] };
       // Fence like loadSession: drop the response if the session changed or a
       // newer navigate started while this request was in flight.
-      if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== seq) return;
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
+      if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== seq) return false;
+      // A different branch is a different window: its epoch voids the old
+      // one's reader position and any history page still in flight for it.
+      const epoch = ++windowEpochRef.current;
+      branchLeafRef.current = leafId ? { epoch, leafId } : null;
+      setHistoryWindow(windowFromContext(d.context, epoch));
+      // The counts, usage and latest turn shown are this branch's, not the session leaf's.
+      setData((prev) => (prev ? { ...prev, historyStats: d.historyStats } : prev));
+      setOlderStatus("idle");
+      setNewerStatus("idle");
+      completionScrollAllowedRef.current = true;
+      readerAnchorRef.current = null;
+      pendingScrollToUserRef.current = true;
       setTodoPhases(d.context.todoPhases ?? []);
+      return true;
     } catch (e) {
       console.error("Failed to load context:", e);
+      return false;
     }
+  }, [sessionKind]);
+
+  /** One history page next to the window's edge: `before` the oldest held message or `after` the newest. */
+  const fetchHistoryPage = useCallback(async (sid: string, direction: "before" | "after", cursor: string): Promise<WindowContext> => {
+    const params = new URLSearchParams({ page: "1", deferThinking: "1", deferMedia: "1", [direction]: cursor });
+    const branch = branchLeafRef.current;
+    if (branch && branch.epoch === historyWindowRef.current.meta.epoch) params.set("leafId", branch.leafId);
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json() as { context: WindowContext };
+    return body.context;
   }, []);
+
+  /** Jump to the newest messages: the live end, attached again. Resolves true once the fresh tail is in place. */
+  const latestInFlightRef = useRef<Promise<boolean> | null>(null);
+  const [latestStatus, setLatestStatus] = useState<HistoryLoadStatus>("idle");
+  const returnToLive = useCallback((): Promise<boolean> => {
+    if (latestInFlightRef.current) return latestInFlightRef.current;
+    const sid = sessionIdRef.current;
+    if (!sid) return Promise.resolve(false);
+    const branch = branchLeafRef.current;
+    const viewedBranch = branch !== null && branch.epoch === historyWindowRef.current.meta.epoch ? branch.leafId : null;
+    const before = tailAdoptedCountRef.current;
+    setLatestStatus("loading");
+    const run = (async () => {
+      // Back to the live end of the branch being viewed. Sending must not
+      // change which branch is shown, so a viewed branch reloads itself; the
+      // session's own leaf takes over at the run's terminal reload, as before.
+      let landed: boolean;
+      if (viewedBranch !== null) {
+        landed = await loadContext(sid, viewedBranch);
+      } else {
+        await loadSession(sid, false, false, undefined, undefined, true);
+        landed = tailAdoptedCountRef.current !== before;
+      }
+      if (hookAliveRef.current) setLatestStatus(landed ? "idle" : "error");
+      if (landed) {
+        setOlderStatus("idle");
+        setNewerStatus("idle");
+        completionScrollAllowedRef.current = true;
+        readerAnchorRef.current = null;
+        pendingScrollToUserRef.current = true;
+      }
+      return landed;
+    })().finally(() => {
+      latestInFlightRef.current = null;
+    });
+    latestInFlightRef.current = run;
+    return run;
+  }, [loadSession, loadContext]);
+
+  /**
+   * A history request failed with 410: the cursor names a message no longer on
+   * the branch (compacted away, another branch). The window cannot be walked
+   * any further, so take the fresh tail.
+   */
+  const recoverGoneCursor = useCallback(() => {
+    void returnToLive();
+  }, [returnToLive]);
+
+  /** Load the page before the oldest held message. Resolves the number of messages added. */
+  const loadOlder = useCallback(async (): Promise<number> => {
+    const sid = sessionIdRef.current;
+    const start = historyWindowRef.current;
+    const cursor = start.meta.olderCursor;
+    if (!sid || cursor === null || olderInFlightRef.current) return 0;
+    olderInFlightRef.current = true;
+    setOlderStatus("loading");
+    try {
+      const page = await fetchHistoryPage(sid, "before", cursor);
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return 0;
+      // The window may have been replaced, branched, or trimmed at this edge
+      // while the request was out: then the page answers a question nobody asks.
+      const current = historyWindowRef.current;
+      if (current.meta.epoch !== start.meta.epoch || current.meta.olderCursor !== cursor) {
+        setOlderStatus("idle");
+        return 0;
+      }
+      const result = prependPage(current, page, cursor);
+      if (typeof result === "string") throw new Error(`history page ${result}`);
+      const added = result.messages.length - current.messages.length;
+      setHistoryWindow((latest) => {
+        const applied = prependPage(latest, page, cursor);
+        return typeof applied === "string" ? latest : settleHistoryWindow(applied, readerProbeRef.current(), added);
+      });
+      setOlderStatus("idle");
+      return added;
+    } catch (e) {
+      console.error("Failed to load earlier messages:", e);
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        setOlderStatus("error");
+        if (e instanceof Error && e.message === "HTTP 410") recoverGoneCursor();
+      }
+      return 0;
+    } finally {
+      olderInFlightRef.current = false;
+    }
+  }, [fetchHistoryPage, recoverGoneCursor]);
+
+  /** Load the page after the newest held message of a window that is away from the live end. */
+  const loadNewer = useCallback(async (): Promise<number> => {
+    const sid = sessionIdRef.current;
+    const start = historyWindowRef.current;
+    const cursor = start.meta.newerCursor;
+    if (!sid || cursor === null || newerInFlightRef.current) return 0;
+    newerInFlightRef.current = true;
+    setNewerStatus("loading");
+    try {
+      const page = await fetchHistoryPage(sid, "after", cursor);
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return 0;
+      const current = historyWindowRef.current;
+      if (current.meta.epoch !== start.meta.epoch || current.meta.newerCursor !== cursor) {
+        setNewerStatus("idle");
+        return 0;
+      }
+      const result = appendPage(current, page, cursor);
+      if (typeof result === "string") throw new Error(`history page ${result}`);
+      const added = result.messages.length - current.messages.length;
+      setHistoryWindow((latest) => {
+        const applied = appendPage(latest, page, cursor);
+        return typeof applied === "string" ? latest : settleHistoryWindow(applied, readerProbeRef.current());
+      });
+      setNewerStatus("idle");
+      // Reaching the live end: whatever completed while the reader was away is
+      // in the transcript, not in this window. One merge-reload brings it in.
+      if (result.meta.newerCursor === null) void loadSession(sid);
+      return added;
+    } catch (e) {
+      console.error("Failed to load newer messages:", e);
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        setNewerStatus("error");
+        if (e instanceof Error && e.message === "HTTP 410") recoverGoneCursor();
+      }
+      return 0;
+    } finally {
+      newerInFlightRef.current = false;
+    }
+  }, [fetchHistoryPage, loadSession, recoverGoneCursor]);
+
+  // Live-only messages (streamed or optimistic, no entry id yet) cannot be
+  // trimmed: nothing addresses them for a "load it back". A run that never
+  // idles would grow them without bound, so past a threshold the tail is
+  // re-read from disk, where they gain ids and become ordinary, trimmable
+  // history. One request at a time, never per frame; the live messages the
+  // transcript has not written yet are kept (fastTailRef, as on a switch's
+  // fast attach); a failure backs off before the next try. A detached window
+  // holds no live-only messages (enforceWindow strips them), so only an
+  // attached one - following or reading - can be under this pressure.
+  const underPressure = useMemo(() => liveOnlyUnderPressure(messages, historyMeta.persisted), [messages, historyMeta.persisted]);
+  const detachedWindow = historyMeta.newerCursor !== null;
+  const pressureReloadRef = useRef({ inFlight: false, notBefore: 0 });
+  useEffect(() => {
+    if (sessionKind === "sidebar" || detachedWindow || !underPressure) return;
+    const state = pressureReloadRef.current;
+    const run = () => {
+      const sid = sessionIdRef.current;
+      const held = historyWindowRef.current;
+      // A viewed branch is display-only: the session's own tail is not its tail.
+      if (branchLeafRef.current?.epoch === held.meta.epoch) return;
+      if (!sid || state.inFlight || isDetached(held) || fastTailRef.current !== null) return;
+      const delivered = new Set<string>();
+      for (const message of held.messages.slice(held.meta.persisted)) {
+        const key = messageReplayKey(message);
+        if (key !== null) delivered.add(key);
+      }
+      state.inFlight = true;
+      const adoptedBefore = tailAdoptedCountRef.current;
+      fastTailRef.current = { sid, delivered };
+      // Fenced on the run in progress: a new run starting mid-request drops the answer.
+      void loadSession(sid, false, false, promptRunIdRef.current).finally(() => {
+        if (fastTailRef.current?.delivered === delivered) fastTailRef.current = null;
+        state.inFlight = false;
+        state.notBefore = Date.now() + (tailAdoptedCountRef.current === adoptedBefore ? LIVE_ONLY_REHYDRATE_BACKOFF_MS : LIVE_ONLY_REHYDRATE_MIN_GAP_MS);
+      });
+    };
+    const wait = state.notBefore - Date.now();
+    if (wait <= 0) {
+      run();
+      return;
+    }
+    const timer = setTimeout(run, wait);
+    return () => clearTimeout(timer);
+  }, [underPressure, messages.length, detachedWindow, sessionKind, loadSession]);
 
   /** Manual retry for the full-page "Loading session failed" error view —
    * the one case where loadSession had nothing on screen to keep, so it fell
@@ -3731,7 +4048,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setAgentPhase(null);
     dispatch({ type: "end" });
-  }, []);
+  }, [setMessages]);
 
   /** The chat could not be reopened because its saved model is gone: raise the
    *  way out, and drop the event stream. The server ends it after telling us, and
@@ -4667,7 +4984,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, liveToolOutput, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState, settleAgentModelSwitch]);
+  }, [addNotice, liveToolOutput, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState, setMessages, settleAgentModelSwitch]);
   handleAgentEventRef.current = handleAgentEvent;
 
   /** Shared recovery for a send that never actually started a run: undo the
@@ -4813,6 +5130,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     if (bashRunningRef.current) return false;
+    // A message belongs at the live end. A reader who walked away from it goes
+    // back first, so the bubble and the reply appear where the chat is, not
+    // under a gap in old history. If the way back fails nothing is sent.
+    if (isDetached(historyWindowRef.current) && !(await returnToLive())) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     // Shell mode belongs to the rpc-dialect engines. An ACP session accepts no
@@ -4988,7 +5309,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!wasIdle) void refreshSubagentRoster(sid);
       });
     return true;
-  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, promoteNewSession, waitForPromptSettlement, rollBackFailedSend, refreshSubagentRoster, deliverOutboxEntry]);
+  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, promoteNewSession, waitForPromptSettlement, rollBackFailedSend, refreshSubagentRoster, deliverOutboxEntry, returnToLive, setMessages]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -4998,6 +5319,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!trimmedMessage && !images?.length) return false;
     const sid = sessionIdRef.current;
     if (!sid || !agentRunningRef.current) return false;
+    if (isDetached(historyWindowRef.current) && !(await returnToLive())) return false;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -5045,7 +5367,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStreamAlert({ kind: "send_failed", detail });
       return false;
     }
-  }, [addNotice, ensureEventsConnected, refreshSubagentRoster]);
+  }, [addNotice, ensureEventsConnected, refreshSubagentRoster, returnToLive, setMessages]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -6054,7 +6376,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Recompute even while idle: otherwise the flag stays false after a run
     // ends while the user is scrolled up, and a message that arrives outside
     // a run (queued follow-up, steering reply) would never auto-scroll.
-    const following = end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
+    // A window away from the live end has no bottom to follow: it ends where history does.
+    const following = !isDetached(historyWindowRef.current) && end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
     completionScrollAllowedRef.current = following;
     if (following) {
       readerAnchorRef.current = null;
@@ -6657,6 +6980,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // tail, what a reader is anchored on, and whether the finished turn must
     // stay unfolded under them.
     followingRef: completionScrollAllowedRef, readerAnchorRef, readerHoldsTail,
+    // The bounded working set: where the window sits in the chat, and how to
+    // walk it. `detached` means the reader is away from the live end.
+    history: {
+      olderCursor: historyMeta.olderCursor,
+      newerCursor: historyMeta.newerCursor,
+      detached: historyMeta.newerCursor !== null,
+      liveAhead: historyMeta.liveAhead,
+      totalMessages: historyMeta.totalMessages,
+      // The messages the server already has, and its per-model turn counts for
+      // them: whole-chat figures a window cannot compute from what it holds.
+      persistedCount: historyMeta.persisted,
+      persistedModelTurns: data?.historyStats?.modelTurns ?? null,
+      olderStatus, newerStatus, latestStatus,
+      loadOlder, loadNewer, returnToLive,
+    },
     // Actions
     handleSend, handleAbort, handleFork, handleForkHere, handleNavigate, handleModelChange, selectSmartModel, selectLocalOnly, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleAbortCompaction,

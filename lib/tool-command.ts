@@ -31,7 +31,7 @@ export interface ToolCommandCall {
 
 const MAX_RECORDS = 8;
 const MAX_TOOL_CHARS = 128;
-const MCP_COMMAND = /^mcp__[A-Za-z0-9_]+$/;
+export const MCP_COMMAND = /^mcp__[A-Za-z0-9_]+$/;
 
 /** `details.toolCommands` of a bash result (omp 19.1+), bounded: one record per tool command the shell ran. */
 export function toolCommandRecords(details: unknown): ToolCommandRecord[] {
@@ -53,7 +53,7 @@ export function toolCommandRecords(details: unknown): ToolCommandRecord[] {
  * The words of ONE simple shell command, quotes resolved, or null when the line is anything more (a second
  * command, a pipe, a redirect, an expansion, a comment) or cannot be read (an unclosed quote).
  */
-function simpleCommandWords(line: string): string[] | null {
+export function simpleCommandWords(line: string): string[] | null {
   const words: string[] = [];
   let current = "";
   let inWord = false;

@@ -11,6 +11,7 @@ app/api/
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
   sessions/[id]/media/route.ts    GET one deferred tool-result image's bytes
+  sessions/[id]/detail/route.ts   GET one page of an oversized thinking / result / argument text, `?entryId=` like the media route (replaces the old thinking route)
   sessions/[id]/scheduled/route.ts GET list / POST schedule a message for later (owner-checked)
   sessions/[id]/scheduled/[itemId]/route.ts  PATCH change text/time / DELETE cancel
   sessions/[id]/scheduled/[itemId]/send-now/route.ts  POST send it now (a failed one's Retry)
@@ -514,6 +515,8 @@ lib/
                        resolveSessionPath() which searches cody-sidebar-chats/** as fallback;
                        listAllSessions() excludes sidebar (scans only main sessions root);
                        isSidebarSessionPath() gates access control in DELETE /api/sidebar-chats/[id]
+  lazy-blocks.ts       pure: preview stubs for oversized persisted thinking / tool-call args and the results of generic paired calls (projectLazyBlocks), pointer helpers, index-based 64 KiB pages (sliceLazyPage; no size cap); the detail route and LazyDetailText are its two ends
+  lazy-pager.ts       framework-free one-page-at-a-time state machine (go/next/previous/first/last/retry/dispose) behind LazyDetailText
   btw.ts               side questions (omp 18.7 `/btw`), pure + browser-safe: topic types, parseSideQuestionCommand, the frame/snapshot merge rules (applyBtwFrame, mergeBtwSnapshot), describeBtwError, the omp-version gate
   btw-history.ts       server-only bounded reader of omp's btw-history sidecar beside the session file (running → interrupted when no engine is live)
   sidebar-mode.ts      the Side Bar's pure view state (browser-safe reducer): which view is chosen (This chat / New chat), a `/btw` request taken exactly once, a bare `/btw`'s cursor still waiting to land, and the choice dropped when This chat goes away
@@ -547,6 +550,10 @@ lib/
   subagent-transcript.ts  the open subagent transcript as a bounded window of
                        pages: rows keyed by byte offset, prepend/append, and
                        trimming that drops the page farthest from the reader
+  chat-history-window.ts  the open chat as a bounded window of history pages:
+                       prepend/append by cursor, tail merge, trimming away
+                       from the reader — see "The open chat is a bounded window"
+                       in chat-ui.md
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts          project/worktree resolution and git worktree operations
@@ -594,6 +601,7 @@ components/
                       MessageView, the one "Show earlier" control, "Jump to
                       latest", loading / error / empty states
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
+  LazyDetailText.tsx  the paged "Show full" viewer MessageView mounts for oversized blocks
   HomelabberApproval.tsx the React half of those approvals: the transcript-wide
                       index (context + provider), `useApprovalCard`, the status
                       row with the live countdown and the two ways to approve

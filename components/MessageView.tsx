@@ -20,6 +20,8 @@ import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { StreamingMarkdown } from "./StreamingMarkdown";
+import { LazyDetailText, LazyStub, fetchLazyPage } from "./LazyDetailText";
+import { decodePointer, lazyBlockChars, type LazyDetailRef } from "@/lib/lazy-blocks";
 
 import { requestDistill, retryDistill, thinkingSummaryKeys, useDistillChatSettings, useDistillState, useOnScreen, type DistillRequest, type DistillState } from "@/hooks/useDistill";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
@@ -46,8 +48,6 @@ import type {
   ActivityDisplayMode,
 } from "@/lib/types";
 
-const MAX_THINKING_CACHE_ENTRIES = 100;
-const thinkingContentCache = new Map<string, Promise<string>>();
 const MAX_MARKDOWN_CHARS = 100_000;
 /** Tool output rendered inline before the "view full output" reveal. */
 const MAX_INLINE_RESULT_CHARS = 200_000;
@@ -94,35 +94,6 @@ export function SafeMarkdownBody({ children, className, ...props }: ComponentPro
       </pre>
     </div>
   );
-}
-
-function loadThinkingContent(sessionId: string, entryId: string, blockIndex: number): Promise<string> {
-  const key = `${sessionId}:${entryId}:${blockIndex}`;
-  const cached = thinkingContentCache.get(key);
-  if (cached) {
-    thinkingContentCache.delete(key);
-    thinkingContentCache.set(key, cached);
-    return cached;
-  }
-
-  const request = fetch(
-    `/api/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/thinking?blockIndex=${blockIndex}`,
-  ).then(async (response) => {
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json() as { thinking?: unknown };
-    if (typeof data.thinking !== "string") throw new Error(translate("messageView.invalidThinkingResponse"));
-    return data.thinking;
-  }).catch((error) => {
-    thinkingContentCache.delete(key);
-    throw error;
-  });
-
-  thinkingContentCache.set(key, request);
-  if (thinkingContentCache.size > MAX_THINKING_CACHE_ENTRIES) {
-    const oldestKey = thinkingContentCache.keys().next().value;
-    if (oldestKey) thinkingContentCache.delete(oldestKey);
-  }
-  return request;
 }
 
 interface Props {
@@ -846,7 +817,7 @@ function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, strea
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} activityDisplayMode={activityDisplayMode} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} activityDisplayMode={activityDisplayMode} sessionId={sessionId} blockIndex={blockIndex} />;
   }
   return null;
 }
@@ -964,7 +935,7 @@ function useCollapseMotion() {
  * later collapses it; settled HISTORY blocks still wait until actually
  * scrolled to, so opening a long session distills nothing up front.
  */
-function useThinkingSummary({ distillOn, collapsed, plain, sessionId, entryId, blockIndex, thinking, deferred, isStreaming, isActiveStreamBlock }: {
+function useThinkingSummary({ distillOn, collapsed, plain, sessionId, entryId, blockIndex, thinking, deferred, detailRef, isStreaming, isActiveStreamBlock }: {
   /** Distill is on AND this instance can serve it. Gates BOTH keys — with
    *  it off, nothing is ever asked for. */
   distillOn: boolean;
@@ -979,6 +950,8 @@ function useThinkingSummary({ distillOn, collapsed, plain, sessionId, entryId, b
   blockIndex: number;
   thinking: string;
   deferred: boolean;
+  /** Where a deferred block's text lives (null when it cannot be asked for). */
+  detailRef: LazyDetailRef | null;
   isStreaming: boolean;
   isActiveStreamBlock: boolean;
 }): { text: string; working: boolean; ref: (node: HTMLElement | null) => void } {
@@ -1012,23 +985,24 @@ function useThinkingSummary({ distillOn, collapsed, plain, sessionId, entryId, b
   }, []);
 
   const [attach, onScreen] = useOnScreen(finalKey !== null && !isStreaming);
-  const [historyText, setHistoryText] = useState<string | null>(null);
+  const summaryDone = finalState.text !== "";
   useEffect(() => {
-    if (!onScreen || finalKey === null || sessionId === undefined || entryId === undefined) return;
-    const text = deferred ? historyText : thinking;
-    if (text === null) {
-      // Deferred history keeps the reasoning behind a route. The loader is
-      // shared with the expand path, so a summary and an expand of the same
-      // block cost one request between them.
-      let alive = true;
-      void loadThinkingContent(sessionId, entryId, blockIndex)
-        .then((loaded) => { if (alive) setHistoryText(loaded); })
-        .catch(() => { /* unreadable history: no summary, the box is unchanged */ });
-      return () => { alive = false; };
+    if (!onScreen || finalKey === null || sessionId === undefined || entryId === undefined || summaryDone) return;
+    if (!deferred) {
+      if (thinking !== "") requestDistill({ key: finalKey, sessionId, entryId, blockIndex, kind: "thinking", text: thinking, plain, final: true });
+      return;
     }
-    if (text === "") return;
-    requestDistill({ key: finalKey, sessionId, entryId, blockIndex, kind: "thinking", text, plain, final: true });
-  }, [onScreen, finalKey, sessionId, entryId, blockIndex, deferred, thinking, historyText, plain]);
+    // Deferred history keeps the reasoning behind the detail route. Its first page is what gets summarized, and
+    // it is handed straight to the summarizer: the collapsed box keeps none of it.
+    if (detailRef === null) return;
+    const controller = new AbortController();
+    fetchLazyPage(detailRef, 0, controller.signal)
+      .then((page) => {
+        if (page.text !== "") requestDistill({ key: finalKey, sessionId, entryId, blockIndex, kind: "thinking", text: page.text, plain, final: true });
+      })
+      .catch(() => { /* unreadable history: no summary, the box is unchanged */ });
+    return () => controller.abort();
+  }, [onScreen, finalKey, sessionId, entryId, blockIndex, deferred, detailRef, thinking, plain, summaryDone]);
 
   const text = useMemo(() => {
     if (finalState.text !== "") return finalState.text;
@@ -1067,15 +1041,16 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   const { t } = useI18n();
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
   const expanded = userExpanded ?? (defaultExpanded || (isStreaming === true && isActiveStreamBlock === true));
-  const [content, setContent] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
-  // History loads strip thinking text (session-reader deferThinking) and leave
-  // it behind a route, so the fetch is driven by visibility however it was
-  // reached: opened by hand, expanded by the preference at mount, or revealed
-  // when the preference changes. One request per block, ever.
-  const requestedRef = useRef(false);
+  // History loads strip thinking text (session-reader deferThinking, or the stub of an oversized block) and
+  // leave it behind the detail route. The panel exists only while the box is open, so the text is fetched when
+  // it opens and dropped when it closes (LazyDetailText); the collapsed box holds none of it.
+  const detailEntry = block.lazyEntry ?? entryId;
+  const detailRef = useMemo<LazyDetailRef | null>(
+    () => (block.deferred === true && sessionId && detailEntry ? { sessionId, entryId: detailEntry, kind: "thinking", blockIndex } : null),
+    [block.deferred, sessionId, detailEntry, blockIndex],
+  );
+  const unavailable = block.deferred === true && detailRef === null;
   const summary = useThinkingSummary({
     distillOn: distillThinking,
     collapsed: !expanded,
@@ -1085,24 +1060,10 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
     blockIndex,
     thinking: block.thinking ?? "",
     deferred: block.deferred === true,
+    detailRef,
     isStreaming: isStreaming === true,
     isActiveStreamBlock: isActiveStreamBlock === true,
   });
-
-  useEffect(() => {
-    if (!expanded || !block.deferred || requestedRef.current) return;
-    requestedRef.current = true;
-    if (!sessionId || !entryId) {
-      setError(t("messageView.thinkingUnavailable"));
-      return;
-    }
-
-    setLoading(true);
-    void loadThinkingContent(sessionId, entryId, blockIndex)
-      .then((text) => setContent(text))
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setLoading(false));
-  }, [expanded, block.deferred, sessionId, entryId, blockIndex, t]);
 
   // A box the reader is inside does not close under them. Auto-expansion ends
   // when the next block starts streaming (this instance) or when the
@@ -1197,7 +1158,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
             className="collapse-box-inner"
             style={{
               padding: "8px 10px",
-              color: error ? "var(--status-error)" : "var(--text-muted)",
+              color: unavailable ? "var(--status-error)" : "var(--text-muted)",
               fontSize: 12,
               lineHeight: 1.6,
               whiteSpace: "pre-wrap",
@@ -1205,11 +1166,11 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
               borderTop: "1px solid var(--border)",
             }}
           >
-            {loading
-              ? t("messageView.loadingThinking")
-              : error ?? (block.deferred
-                ? content
-                : <StreamingMarkdown text={block.thinking ?? ""} streaming={isStreaming === true && expanded} plain={true} />)}
+            {block.deferred
+              ? (detailRef
+                ? <LazyDetailText detailRef={detailRef} bodyStyle={{ maxHeight: "none" }} />
+                : t("messageView.thinkingUnavailable"))
+              : <StreamingMarkdown text={block.thinking ?? ""} streaming={isStreaming === true && expanded} plain={true} />}
           </div>
         </CollapsiblePanel>
       </Collapsible>
@@ -1218,6 +1179,8 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 }, (prev, next) => (
   prev.block.thinking === next.block.thinking
   && prev.block.deferred === next.block.deferred
+  && prev.block.lazyEntry === next.block.lazyEntry
+  && prev.block.lazyChars === next.block.lazyChars
   && prev.duration === next.duration
   && prev.sessionId === next.sessionId
   && prev.entryId === next.entryId
@@ -1230,7 +1193,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 ));
 
 
-const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, activityDisplayMode = "compact" }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; activityDisplayMode?: ActivityDisplayMode }) {
+const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, activityDisplayMode = "compact", sessionId, blockIndex }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; activityDisplayMode?: ActivityDisplayMode; sessionId?: string; blockIndex?: number }) {
   const { t } = useI18n();
   const rawError = result?.isError ?? false;
   // HomeLabber answers a call that needs Nitin's Face ID with a request that is
@@ -1267,16 +1230,29 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const activityStatus = getStructuredActivityStatus(result);
   const editRejection = activityStatus === "error" ? getEditRejectionReason(result) : null;
 
-  // Result display
+  // Result display. An oversized text block arrives as a stub (lib/lazy-blocks.ts): its preview is drawn by the
+  // LazyStub of PairedResult, which asks the detail route for the rest only when the reader opens it.
+  const resultBlocks = result && Array.isArray(result.content) ? result.content : [];
+  const lazyResultParts = resultBlocks.flatMap((b, index) => (b.type === "text" && lazyBlockChars(b) > 0
+    ? [{
+        key: index,
+        chars: lazyBlockChars(b),
+        preview: b.text,
+        detailRef: sessionId && b.lazyEntry ? { sessionId, entryId: b.lazyEntry, kind: "result" as const, blockIndex: index } : null,
+      }]
+    : []));
   const resultText = result
     ? (typeof result.content === "string"
         ? result.content
-        : (Array.isArray(result.content) ? result.content : [])
-            .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+        : resultBlocks
+            .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string" && lazyBlockChars(b) === 0)
             .map((b) => b.text)
             .join("\n"))
     : null;
-  const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
+  const resultIsEmpty = resultText === null ? false : lazyResultParts.length === 0 && (resultText.trim() === "(no output)" || resultText.trim() === "");
+  // Oversized arguments (a `write` of a huge file): the JSON above shows each one's preview; the rest is opened
+  // per field, never fetched for a collapsed card.
+  const lazyArgs = Object.entries(block.lazyInput ?? {});
   // Tool-result images (preview_screenshot and friends) render as
   // always-visible thumbnails, not behind the collapse — a screenshot the
   // agent took of its work is the point of the tool call.
@@ -1371,6 +1347,17 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
                 {displayedJson}
               </pre>
             )}
+            {!isEditTool && !askAnswered && lazyArgs.map(([pointer, chars]) => (
+              <div key={pointer} style={{ borderTop: TONE_FRAME[tone].rule, backgroundColor: "var(--bg-subtle)" }}>
+                <LazyStub
+                  detailRef={sessionId && block.lazyEntry && blockIndex !== undefined ? { sessionId, entryId: block.lazyEntry, kind: "arg", blockIndex, pointer } : null}
+                  chars={chars}
+                  field={decodePointer(pointer)?.join(".") ?? pointer}
+                  bodyStyle={{ padding: "8px 10px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, wordBreak: "break-all" }}
+                  mono
+                />
+              </div>
+            ))}
             {result && (
               resultDiff ? (
                 <PairedDiffResult
@@ -1387,6 +1374,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
                         text={resultText ?? ""}
                         isEmpty={resultIsEmpty}
                         isError={isError}
+                        lazy={lazyResultParts}
                       />
                     </>
                   )}
@@ -1425,6 +1413,8 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   && prev.isStreaming === next.isStreaming
   && prev.isActiveStreamBlock === next.isActiveStreamBlock
   && prev.activityDisplayMode === next.activityDisplayMode
+  && prev.sessionId === next.sessionId
+  && prev.blockIndex === next.blockIndex
 ));
 
 interface ResultDiff {
@@ -1799,10 +1789,12 @@ export function getEditRejectionReason(result?: ToolResultMessage): string | nul
   return typeof kind === "string" && kind.length > 0 ? kind.replaceAll("_", " ") : null;
 }
 
-function PairedResult({ text, isEmpty, isError }: {
+function PairedResult({ text, isEmpty, isError, lazy = [] }: {
   text: string;
   isEmpty: boolean;
   isError: boolean;
+  /** Oversized text blocks of this result, shown as preview + "show full". */
+  lazy?: { key: number; chars: number; preview: string; detailRef: LazyDetailRef | null }[];
 }) {
   const { t } = useI18n();
   const [showFull, setShowFull] = useState(false);
@@ -1811,6 +1803,21 @@ function PairedResult({ text, isEmpty, isError }: {
   // 400px of it is visible — then redo it on every width change (sidebar
   // drag). Show the head until the rest is asked for.
   const truncated = !isEmpty && !showFull && text.length > MAX_INLINE_RESULT_CHARS;
+  const textStyle = {
+    margin: 0,
+    padding: "8px 10px",
+    color: isError ? "var(--status-error)" : "var(--text-muted)",
+    fontSize: 12,
+    lineHeight: 1.5,
+    overflow: "auto",
+    // Without this the wheel latches to this box and then chains out to
+    // the transcript with a visible stall.
+    overscrollBehavior: "contain",
+    maxHeight: 400,
+    backgroundColor: "var(--bg)",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-all",
+  } as const;
   return (
     <div
       style={{
@@ -1818,27 +1825,18 @@ function PairedResult({ text, isEmpty, isError }: {
         background: isError ? "color-mix(in srgb, var(--status-error) 4%, transparent)" : "var(--bg-subtle)",
       }}
     >
-      <pre
-        style={{
-          margin: 0,
-          padding: "8px 10px",
-          color: isError ? "var(--status-error)" : (isEmpty ? "var(--text-dim)" : "var(--text-muted)"),
-          fontSize: 12,
-          lineHeight: 1.5,
-          overflow: "auto",
-          // Without this the wheel latches to this box and then chains out to
-          // the transcript with a visible stall.
-          overscrollBehavior: "contain",
-          maxHeight: 400,
-          backgroundColor: "var(--bg)",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-all",
-          fontStyle: isEmpty ? "italic" : "normal",
-          opacity: isEmpty ? 0.6 : 1,
-        }}
-      >
-        {isEmpty ? t("messageView.noOutput") : (truncated ? text.slice(0, MAX_INLINE_RESULT_CHARS) : text)}
-      </pre>
+      {(text !== "" || lazy.length === 0) && (
+        <pre
+          style={{
+            ...textStyle,
+            color: isError ? "var(--status-error)" : (isEmpty ? "var(--text-dim)" : "var(--text-muted)"),
+            fontStyle: isEmpty ? "italic" : "normal",
+            opacity: isEmpty ? 0.6 : 1,
+          }}
+        >
+          {isEmpty ? t("messageView.noOutput") : (truncated ? text.slice(0, MAX_INLINE_RESULT_CHARS) : text)}
+        </pre>
+      )}
       {truncated && (
         <button
           type="button"
@@ -1859,6 +1857,9 @@ function PairedResult({ text, isEmpty, isError }: {
           {t("messageView.viewFullOutput")}
         </button>
       )}
+      {lazy.map((part) => (
+        <LazyStub key={part.key} detailRef={part.detailRef} chars={part.chars} preview={part.preview} previewStyle={textStyle} bodyStyle={textStyle} mono />
+      ))}
     </div>
   );
 }

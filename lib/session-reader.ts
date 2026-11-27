@@ -10,6 +10,8 @@ import {
   loadSessionFileWithCursor,
   readSessionHeaderSync,
   resolveSessionLeafId,
+  findRecordInTail,
+  resolveBlobRefsInEntries,
   type CursoredSessionLoad,
   type LoadedSession,
   type LoadSessionOptions,
@@ -22,10 +24,12 @@ import type {
   SessionContext,
   SessionEntry,
   SessionHeader,
+  SessionMessageEntry,
   SessionInfo,
 } from "./types";
 import { normalizeToolCalls } from "./normalize";
 import { isRecord } from "./type-guards";
+import { WeightedLru } from "./session-parse-cache";
 import { goalFromPersistedMode } from "./goal-state";
 import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
 import { isAskXdevDetails, keepAskToolResultDetails } from "./ask-result";
@@ -34,6 +38,7 @@ import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
 import { foldSystemReminder } from "./system-reminder";
 import { isHiddenFromTranscript } from "./message-display";
+import { projectLazyBlocks } from "./lazy-blocks";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { displaySessionTitle } from "./session-title";
 import { lastActiveMs } from "./project-ordering";
@@ -432,20 +437,59 @@ interface SessionParseCacheEntry {
   parsed: CursoredSessionLoad;
 }
 
+/** One memory budget for every parsed session the server keeps, across chats
+ * and across the three caches below, counted in characters of session text
+ * held (the file's lines, less what a pruned load dropped, plus the inline media
+ * blob resolution added), plus a fixed charge per entry (see
+ * SESSION_ENTRY_OVERHEAD_BYTES). The heap behind a parse is a small
+ * multiple of that (about 2-3x for JSON-shaped text), so this holds the parses
+ * to a few hundred MB of heap however many long chats are open. A session
+ * bigger than the whole budget is parsed again on every read, not kept. */
+export const SESSION_PARSE_CACHE_BYTES = 128 * 1024 * 1024;
+/** What one parsed entry costs beyond its text: the objects, keys and strings a JSON row becomes. A short row (a bare tool result, a status line) is about 100 bytes of file and about 700 of heap, so counting the text alone would let millions of them far exceed the estimate. */
+const SESSION_ENTRY_OVERHEAD_BYTES = 256;
+
+const ENTRIES_GROUP = "entries";
+const LOADED_GROUP = "loaded";
+const HISTORY_GROUP = "history";
+// Count caps inside the shared budget. The loaded cache is the smaller one: an
+// entry there can hold blob-resolved (base64-inflated) content.
+const SESSION_PARSE_GROUP_CAPS = { [ENTRIES_GROUP]: 32, [LOADED_GROUP]: 8, [HISTORY_GROUP]: 8 };
+
+declare global {
+  var __ompSessionParseCache: WeightedLru<SessionParseCacheEntry> | undefined;
+}
+
+function parseCache(): WeightedLru<SessionParseCacheEntry> {
+  return (globalThis.__ompSessionParseCache ??= new WeightedLru(SESSION_PARSE_CACHE_BYTES, SESSION_PARSE_GROUP_CAPS));
+}
+
+/** Test-only: empty the parse caches, optionally under a smaller budget. */
+export function __resetSessionParseCacheForTests(budget: number = SESSION_PARSE_CACHE_BYTES): void {
+  globalThis.__ompSessionParseCache = new WeightedLru(budget, SESSION_PARSE_GROUP_CAPS);
+}
+
+/** Test-only: what the parse caches hold right now. */
+export function __sessionParseCacheStatsForTests(): { weight: number; size: number } {
+  const cache = parseCache();
+  return { weight: cache.weight, size: cache.size };
+}
+
 /** Bring a session file's cached parse up to date and return it. An
  * unchanged file (same size and mtime) costs one stat. A file that only grew
  * (omp appends every entry) costs a parse of the appended lines alone, so a
  * running chat's transcript no longer re-parses tens of MB on every switch and
  * reconcile poll while blocking the server's one thread. Anything else (a
- * rewritten, shrunk or replaced file) is parsed again in full. Entries are
+ * rewritten, shrunk or replaced file) is parsed again in full, after the stale
+ * parse is released so the two never sit in memory together. Entries are
  * SHARED with earlier results: callers must treat them as immutable. */
 function loadThroughParseCache(
-  cache: Map<string, SessionParseCacheEntry>,
+  group: string,
   key: string,
   filePath: string,
   options: LoadSessionOptions,
-  maxEntries: number,
 ): LoadedSession {
+  const cache = parseCache();
   let size: number;
   let mtimeMs: number;
   try {
@@ -454,47 +498,40 @@ function loadThroughParseCache(
     mtimeMs = stat.mtimeMs;
   } catch {
     // Missing/unreadable file — mirror loadSessionFile's lenient empty result.
+    cache.delete(key);
     return loadSessionFile(filePath, options);
   }
   const cached = cache.get(key);
-  if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
-    cache.delete(key);
-    cache.set(key, cached);
-    return cached.parsed.loaded;
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return cached.parsed.loaded;
+  let parsed = cached ? extendLoadedSession(filePath, cached.parsed, options) : null;
+  if (!parsed) {
+    if (cached) cache.delete(key);
+    parsed = loadSessionFileWithCursor(filePath, options);
   }
-  const parsed = (cached && extendLoadedSession(filePath, cached.parsed, options)) ?? loadSessionFileWithCursor(filePath, options);
   // Only cache a successfully parsed session: a too-large/malformed result is
   // cheap to reproduce, and pinning it would waste a slot forever if the
   // underlying condition was transient (e.g. a torn concurrent write).
-  if (!parsed.loaded.header) return parsed.loaded;
+  if (!parsed.loaded.header) {
+    cache.delete(key);
+    return parsed.loaded;
+  }
   // A cursor knows the size and mtime its parse reached. Without one, the stat
   // taken before the parse is the safe key: a write during the parse changes
   // the file's stat, so the next read parses again.
-  cache.delete(key);
-  cache.set(key, parsed.cursor
-    ? { size: parsed.cursor.size, mtimeMs: parsed.cursor.mtimeMs, parsed }
-    : { size, mtimeMs, parsed });
-  while (cache.size > maxEntries) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey === undefined) break;
-    cache.delete(oldestKey);
-  }
+  const reached = parsed.cursor
+    ? { size: parsed.cursor.size, mtimeMs: parsed.cursor.mtimeMs }
+    : { size, mtimeMs };
+  cache.set(key, group, { ...reached, parsed }, parsed.heldChars + SESSION_ENTRY_OVERHEAD_BYTES * parsed.loaded.entries.length);
   return parsed.loaded;
 }
 
 /** Session entries without blob resolution, through a parse cache (see
  * loadThroughParseCache) for read-only scans (file-reference checks, thinking
- * routes, delivery checks) that run on every reconcile poll and at run end.
- * Stored on globalThis for hot-reload safety and LRU-bounded. */
-declare global {
-  var __ompSessionEntriesParseCache: Map<string, SessionParseCacheEntry> | undefined;
-}
-
-const MAX_SESSION_ENTRIES_CACHE_ENTRIES = 32;
-
+ * routes, delivery checks, replay of a message the stream no longer holds)
+ * that run on every reconcile poll and at run end. Stored on globalThis for
+ * hot-reload safety and LRU-bounded by the shared parse budget. */
 export function getSessionEntries(filePath: string): SessionEntry[] {
-  globalThis.__ompSessionEntriesParseCache ??= new Map();
-  return loadThroughParseCache(globalThis.__ompSessionEntriesParseCache, filePath, filePath, {}, MAX_SESSION_ENTRIES_CACHE_ENTRIES).entries;
+  return loadThroughParseCache(ENTRIES_GROUP, `${ENTRIES_GROUP}\u0000${filePath}`, filePath, {}).entries;
 }
 
 /** loadSessionFile() through a parse cache (see loadThroughParseCache) keyed
@@ -511,22 +548,78 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
  * (buildSessionTree, buildSessionContext, entryToUiMessage,
  * normalizeToolCalls, …) only reads entries and returns new objects.
  */
-declare global {
-  var __ompLoadedSessionParseCache: Map<string, SessionParseCacheEntry> | undefined;
-}
-
-// Smaller than MAX_SESSION_ENTRIES_CACHE_ENTRIES above: an entry here can
-// hold blob-resolved (base64-inflated) content, so it costs more memory per
-// slot for an image-heavy session.
-const MAX_LOADED_SESSION_CACHE_ENTRIES = 8;
-
 function loadedSessionCacheKey(filePath: string, options: LoadSessionOptions): string {
-  return `${filePath}\u0000${options.resolveBlobs ? "1" : "0"}\u0000${options.skipToolResultImages ? "1" : "0"}`;
+  return `${LOADED_GROUP}\u0000${filePath}\u0000${options.resolveBlobs ? "1" : "0"}\u0000${options.skipToolResultImages ? "1" : "0"}`;
 }
 
 export function loadSessionFileCached(filePath: string, options: LoadSessionOptions = {}): LoadedSession {
-  globalThis.__ompLoadedSessionParseCache ??= new Map();
-  return loadThroughParseCache(globalThis.__ompLoadedSessionParseCache, loadedSessionCacheKey(filePath, options), filePath, options, MAX_LOADED_SESSION_CACHE_ENTRIES);
+  return loadThroughParseCache(LOADED_GROUP, loadedSessionCacheKey(filePath, options), filePath, options);
+}
+
+/** A session as the history page routes read it (GET /api/sessions/[id] and
+ * /context with `page`, the detail and media routes): the same parse the
+ * deferMedia transcript always read (blobs inlined except tool-result images),
+ * with what no page shows left out of every entry (pruneEntryForHistoryPage).
+ * A real long chat is mostly such engine-only data, so this is what keeps a
+ * 150 MB session inside the parse budget, append-aware, where the raw parse is
+ * not. A SEPARATE cache from the raw ones: raw consumers (getSessionEntries,
+ * loadSessionFileCached) still see every field. Entries are shared and
+ * immutable, as there. */
+export function loadSessionForHistoryPage(filePath: string): LoadedSession {
+  return loadThroughParseCache(HISTORY_GROUP, `${HISTORY_GROUP}\u0000${filePath}`, filePath, HISTORY_PAGE_LOAD);
+}
+
+/** A message as it sits in the session file, named the way the stream and the
+ * page name it (see lib/attach-replay.ts messageReplayKey). */
+export interface PersistedMessageRef {
+  role: string;
+  timestamp: number;
+  toolCallId?: string;
+}
+
+// A message the stream just delivered is at the very end of the file, so these
+// read backward from the end (see findRecordInTail) and never parse the file:
+// a 185 MB session costs about the size of the message and what followed it.
+// The reach scales with the frame (its line is about as long, plus JSON
+// escaping), and a check made on a timer or per message is kept short; the one
+// made when a page attaches may reach further, because a run can write a lot
+// after a frame it has already reduced. Beyond its reach a message reads as
+// absent: its frame then stays in memory, or is left out of the replay.
+const HAS_REACH_BASE_BYTES = 1024 * 1024;
+const HAS_REACH_MAX_BYTES = 16 * 1024 * 1024;
+const READ_REACH_BASE_BYTES = 16 * 1024 * 1024;
+const READ_REACH_MAX_BYTES = 64 * 1024 * 1024;
+
+function findPersistedMessageEntry(filePath: string, ref: PersistedMessageRef, reachBytes: number): SessionMessageEntry | undefined {
+  if (!filePath) return undefined;
+  const needles = [String(ref.timestamp)];
+  if (ref.role === "toolResult" && ref.toolCallId) needles.push(ref.toolCallId);
+  const record = findRecordInTail(filePath, needles, (candidate) => {
+    const message = candidate.message;
+    return candidate.type === "message" && isRecord(message)
+      && message.role === ref.role && message.timestamp === ref.timestamp
+      && (ref.role !== "toolResult" || message.toolCallId === ref.toolCallId);
+  }, reachBytes);
+  return record as unknown as SessionMessageEntry | undefined;
+}
+
+/** Whether the session file already holds this message. `frameBytes` is the
+ * frame's size, which sets how far back the file is searched. */
+export function hasPersistedMessage(filePath: string, ref: PersistedMessageRef, frameBytes: number): boolean {
+  const reach = Math.min(HAS_REACH_MAX_BYTES, HAS_REACH_BASE_BYTES + 2 * frameBytes);
+  return findPersistedMessageEntry(filePath, ref, reach) !== undefined;
+}
+
+/** The message from the session file with its media blobs resolved, shaped as
+ * the engine's own `message_end` carried it; null when the file does not hold
+ * it within reach. It is parsed fresh from the file, so nothing shared is
+ * modified, and only this one message has its blobs resolved. */
+export function readPersistedMessage(filePath: string, ref: PersistedMessageRef, frameBytes: number): AgentMessage | null {
+  const reach = Math.min(READ_REACH_MAX_BYTES, READ_REACH_BASE_BYTES + 2 * frameBytes);
+  const entry = findPersistedMessageEntry(filePath, ref, reach);
+  if (!entry) return null;
+  resolveBlobRefsInEntries([entry]);
+  return entry.message;
 }
 
 function parseTodoPhases(value: unknown): TodoPhase[] | null {
@@ -599,6 +692,10 @@ export function buildSessionContext(
   options: {
     deferThinking?: boolean;
     deferToolResultImages?: boolean;
+    /** Replace every oversized tool-result text, thinking block and tool-call argument string with a stub the
+     *  detail route can expand (lib/lazy-blocks.ts). Only for callers whose renderer is MessageView with a
+     *  session id. */
+    deferOversizedBlocks?: boolean;
     /** With deferToolResultImages: replace each deferred image with a
      *  url-source block minted by this factory (entry id + image index)
      *  instead of a text placeholder. */
@@ -672,10 +769,13 @@ export function buildSessionContext(
 
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
+  // Oldest message first: assistant entries record their generic tool calls here so the results that follow can
+  // be stubbed only when a card with a "show full" control is there to draw them (lib/lazy-blocks.ts).
+  const genericCalls = options.deferOversizedBlocks ? new Set<string>() : undefined;
   const appendEntry = (entry: SessionEntry) => {
     const message = entry.type === "compaction"
       ? compactionUiMessage(entry, entry.id === compaction?.id)
-      : entryToUiMessage(entry, options);
+      : entryToUiMessage(entry, options, genericCalls);
     if (message) {
       messages.push(message);
       entryIds.push(entry.id);
@@ -851,6 +951,10 @@ function keepTaskToolResultDetails(details: Record<string, unknown>): Record<str
 function stripToolResultDetails(message: AgentMessage): AgentMessage {
   if (message.role !== "toolResult" || message.details === undefined) return message;
   const { details, ...rest } = message;
+  if (isRecord(details) && PRUNED_RESULT_DETAILS.has(details)) {
+    const shown = PRUNED_RESULT_DETAILS.get(details);
+    return shown === undefined ? rest : { ...rest, details: shown };
+  }
   if (isRecord(details)) {
     const kept: Record<string, unknown> = {};
     if (typeof details.patch === "string") kept.patch = details.patch;
@@ -878,6 +982,72 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
   }
   return rest;
 }
+
+/** The `details` a pruned load (pruneEntryForHistoryPage) already reduced to
+ * what stripToolResultDetails would send, each mapped to what it sends: that
+ * projection is not idempotent (a task result's `usage` is dropped once its
+ * cost is read), so it must run once, not again at output. */
+const PRUNED_RESULT_DETAILS = new WeakMap<object, Record<string, unknown> | undefined>();
+
+/** What a history page never reads from an assistant message: the engine's
+ * own record of the request it made (the provider payload it replays, the
+ * input transformations and the request controls). A real long chat holds tens
+ * of MB of them. `contextSnapshot` stays: the context meter reads it. */
+const ENGINE_ONLY_ASSISTANT_KEYS = ["providerPayload", "inputTransformations", "requestControls"] as const;
+
+/** A compaction entry's `preserveData` is engine-only state (omp 18.10+ keeps
+ * its snapcompact archive there, up to 12 MB a copy); the page never reads it. */
+const ENGINE_ONLY_COMPACTION_KEYS = ["preserveData"] as const;
+
+/**
+ * LoadSessionOptions.prune for the history page: delete from a freshly parsed
+ * entry what no page response carries, and return the characters of JSON that
+ * removed.
+ *  - compaction `preserveData` and an assistant message's engine-only request
+ *    records, never read by the page;
+ *  - a toolResult's `details`, reduced to what stripToolResultDetails sends
+ *    (the response does that anyway) plus a todo result's `phases`, which the
+ *    branch's todo state is read from (buildSessionContext).
+ * Message text, thinking, tool arguments and images stay whole: the detail and
+ * media routes read them from this same parse.
+ */
+function pruneEntryForHistoryPage(record: Record<string, unknown>): number {
+  const message = record.type === "message" && isRecord(record.message) ? record.message : null;
+  let holder: Record<string, unknown> | null = null;
+  let keys: readonly string[] = [];
+  if (record.type === "compaction") {
+    holder = record;
+    keys = ENGINE_ONLY_COMPACTION_KEYS;
+  } else if (message?.role === "assistant") {
+    holder = message;
+    keys = ENGINE_ONLY_ASSISTANT_KEYS;
+  }
+  let dropped = 0;
+  if (holder) {
+    for (const key of keys) {
+      if (holder[key] === undefined) continue;
+      dropped += JSON.stringify(holder[key]).length;
+      delete holder[key];
+    }
+  }
+  if (message?.role !== "toolResult" || message.details === undefined) return dropped;
+
+  const original = message.details;
+  const stripped = stripToolResultDetails(message as unknown as AgentMessage);
+  const shown = stripped.role === "toolResult" && isRecord(stripped.details) ? stripped.details : undefined;
+  const phases = message.toolName === "todo" && !message.isError && isRecord(original) ? original.phases : undefined;
+  const kept = phases === undefined ? shown : { ...shown, phases };
+  dropped += JSON.stringify(original).length - (kept === undefined ? 0 : JSON.stringify(kept).length);
+  if (kept === undefined) {
+    delete message.details;
+  } else {
+    message.details = kept;
+    PRUNED_RESULT_DETAILS.set(kept, shown);
+  }
+  return dropped;
+}
+
+const HISTORY_PAGE_LOAD: LoadSessionOptions = { resolveBlobs: true, skipToolResultImages: true, prune: pruneEntryForHistoryPage };
 
 /** The blocks the deferral machinery counts as tool-result images: image
  * blocks carrying data (inline base64, or a blob ref when resolution was
@@ -961,8 +1131,11 @@ export function entryToUiMessage(
   options: {
     deferThinking?: boolean;
     deferToolResultImages?: boolean;
+    deferOversizedBlocks?: boolean;
     toolResultImageUrl?: (entryId: string, index: number) => string;
   },
+  /** The pairing state of one oldest-first walk (see projectLazyBlocks); omit it for an entry read alone. */
+  genericCalls?: Set<string>,
 ): AgentMessage | null {
   switch (entry.type) {
     case "message": {
@@ -1027,7 +1200,7 @@ export function entryToUiMessage(
             options.toolResultImageUrl ? (index) => options.toolResultImageUrl!(entry.id, index) : undefined,
           )
         : normalizeToolCalls(raw);
-      const message = stripToolResultDetails(normalized);
+      const message = options.deferOversizedBlocks ? projectLazyBlocks(stripToolResultDetails(normalized), entry.id, genericCalls) : stripToolResultDetails(normalized);
       if (!options.deferThinking || message.role !== "assistant") return message;
       // Guard like the loader does for bad lines: normalizeToolCalls passes
       // non-array content through unchanged, so a string-content assistant
@@ -1036,7 +1209,7 @@ export function entryToUiMessage(
       return {
         ...message,
         content: message.content.map((block) => (
-          block.type === "thinking" && !block.narration && typeof block.thinking === "string" && block.thinking.trim() !== ""
+          block.type === "thinking" && !block.narration && !block.deferred && typeof block.thinking === "string" && block.thinking.trim() !== ""
             ? { ...block, thinking: "", deferred: true }
             : block
         )),

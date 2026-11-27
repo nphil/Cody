@@ -39,12 +39,17 @@ function buildActivePath(nodes: SessionTreeNode[], targetId: string | null): Set
 
 // Compress a visible linear chain into the first branching/leaf node.
 // Server-side compressed IDs also count as skipped nodes.
+/** Entries the server folded into this node: its count, or (a legacy response) its id list. */
+function skippedInChain(node: SessionTreeNode): number {
+  return node.compressedCount ?? node.compressedEntryIds?.length ?? 0;
+}
+
 function compress(node: SessionTreeNode): { node: SessionTreeNode; skipped: number } {
   let current = node;
-  let skipped = current.compressedEntryIds?.length ?? 0;
+  let skipped = skippedInChain(current);
   while (current.children.length === 1) {
     current = current.children[0];
-    skipped += 1 + (current.compressedEntryIds?.length ?? 0);
+    skipped += 1 + skippedInChain(current);
   }
   return { node: current, skipped };
 }

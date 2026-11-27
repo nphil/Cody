@@ -294,9 +294,9 @@ function degradeMissingBlobImage(block: Record<string, unknown>, hash: string): 
   delete block.source;
 }
 
-function resolveBlobsInValue(value: unknown, key: string | undefined): void {
+function resolveBlobsInValue(value: unknown, key: string | undefined, tally: { chars: number }): void {
   if (Array.isArray(value)) {
-    for (const item of value) resolveBlobsInValue(item, key);
+    for (const item of value) resolveBlobsInValue(item, key, tally);
     return;
   }
   if (!isRecord(value)) return;
@@ -310,8 +310,11 @@ function resolveBlobsInValue(value: unknown, key: string | undefined): void {
     const hash = parseBlobRef(value.data);
     if (!hash) return;
     const blob = readBlobSync(hash);
-    if (blob) record.data = blob.toString("base64");
-    else degradeMissingBlobImage(record, hash);
+    if (blob) {
+      const inline = blob.toString("base64");
+      record.data = inline;
+      tally.chars += inline.length;
+    } else degradeMissingBlobImage(record, hash);
     return;
   }
 
@@ -322,18 +325,26 @@ function resolveBlobsInValue(value: unknown, key: string | undefined): void {
   ) {
     const hash = parseBlobRef(record.result);
     const blob = hash ? readBlobSync(hash) : null;
-    if (blob) record.result = blob.toString("base64");
+    if (blob) {
+      const inline = blob.toString("base64");
+      record.result = inline;
+      tally.chars += inline.length;
+    }
   }
 
   if (typeof record.image_url === "string" && isBlobRef(record.image_url)) {
     const hash = parseBlobRef(record.image_url);
     const blob = hash ? readBlobSync(hash) : null;
     // Externalized data URLs are stored as the raw UTF-8 data-URL string.
-    if (blob) record.image_url = blob.toString("utf8");
+    if (blob) {
+      const inline = blob.toString("utf8");
+      record.image_url = inline;
+      tally.chars += inline.length;
+    }
   }
 
   for (const [childKey, item] of Object.entries(record)) {
-    resolveBlobsInValue(item, childKey);
+    resolveBlobsInValue(item, childKey, tally);
   }
 }
 
@@ -357,19 +368,26 @@ export interface ResolveBlobOptions {
   skipToolResultImages?: boolean;
 }
 
-/** Resolve blob references in loaded entries back to inline base64. Mutates in place. */
-export function resolveBlobRefsInEntries(entries: SessionEntry[], options: ResolveBlobOptions = {}): void {
+/**
+ * Resolve blob references in loaded entries back to inline base64. Mutates in
+ * place. Returns how many characters of inline data it added, so a cache can
+ * charge for them: a 1 KiB reference becomes megabytes.
+ */
+export function resolveBlobRefsInEntries(entries: SessionEntry[], options: ResolveBlobOptions = {}): number {
+  const tally = { chars: 0 };
   for (const entry of entries) {
     if (
       options.skipToolResultImages &&
       entry.type === "message" &&
-      (entry.message as { role?: string }).role === "toolResult"
+      isRecord(entry.message) &&
+      entry.message.role === "toolResult"
     ) {
       continue;
     }
     if (!containsBlobRef(entry)) continue;
-    resolveBlobsInValue(entry, undefined);
+    resolveBlobsInValue(entry, undefined, tally);
   }
+  return tally.chars;
 }
 
 // ============================================================================
@@ -389,6 +407,12 @@ export interface LoadedSession {
 export interface LoadSessionOptions extends ResolveBlobOptions {
   /** Resolve blob:sha256 image references to inline base64 for display. */
   resolveBlobs?: boolean;
+  /** Called with every record just parsed, before it is kept. It may delete
+   * fields from the record in place (which nothing else reads), and returns
+   * how many characters of JSON it removed. A load made with a `prune` is a
+   * different view of the file than one without: a cache must key on it, and
+   * an extend must be given the same one. */
+  prune?: (record: Record<string, unknown>) => number;
 }
 
 const SESSION_READ_CHUNK_BYTES = 1024 * 1024;
@@ -506,6 +530,8 @@ export interface CursoredSessionLoad {
   loaded: LoadedSession;
   /** Null when only a full parse can bring this result up to date (a legacy file migrated as a whole, or a failed load). */
   cursor: SessionParseCursor | null;
+  /** Characters of parsed text `loaded.entries` hold: the lines kept (less what `options.prune` dropped) plus the inline base64 / data-URL text that blob resolution added. The memory the file's own size does not show, and what a cache charges for the parse. */
+  heldChars: number;
 }
 
 function readBytesSync(fd: number, position: number, length: number): Buffer {
@@ -567,16 +593,17 @@ export function loadSessionFileWithCursor(filePath: string, options: LoadSession
   try {
     fd = openSync(filePath, "r");
   } catch {
-    return { loaded: { header: null, entries: [], titleSlot: undefined }, cursor: null };
+    return { loaded: { header: null, entries: [], titleSlot: undefined }, cursor: null, heldChars: 0 };
   }
   try {
     if (fstatSync(fd).size > MAX_SESSION_LOAD_BYTES) {
-      return { loaded: { header: null, entries: [], titleSlot: undefined, error: "too_large" }, cursor: null };
+      return { loaded: { header: null, entries: [], titleSlot: undefined, error: "too_large" }, cursor: null, heldChars: 0 };
     }
     let titleSlot: SessionTitleSlot | undefined;
     const records: Record<string, unknown>[] = [];
     let lastFromTail = false;
     let isFirstLine = true;
+    let heldChars = 0;
     let read: LineReadResult;
     try {
       read = forEachLineSync(fd, (rawLine, terminated) => {
@@ -588,7 +615,9 @@ export function loadSessionFileWithCursor(filePath: string, options: LoadSession
         const line = rawLine.trim();
         if (!line) return;
         try {
-          records.push(JSON.parse(line) as Record<string, unknown>);
+          const record = JSON.parse(line) as Record<string, unknown>;
+          heldChars += line.length - (options.prune?.(record) ?? 0);
+          records.push(record);
           lastFromTail = !terminated;
         } catch {
           // Skip malformed line (torn write).
@@ -597,12 +626,12 @@ export function loadSessionFileWithCursor(filePath: string, options: LoadSession
     } catch (error) {
       // A single line past the string cap, or an allocation failure part-way in.
       const tooLarge = error instanceof RangeError;
-      return { loaded: { header: null, entries: [], titleSlot, ...(tooLarge ? { error: "too_large" as const } : {}) }, cursor: null };
+      return { loaded: { header: null, entries: [], titleSlot, ...(tooLarge ? { error: "too_large" as const } : {}) }, cursor: null, heldChars: 0 };
     }
 
     const headerRecord = records[0];
     if (!headerRecord || headerRecord.type !== "session" || typeof headerRecord.id !== "string") {
-      return { loaded: { header: null, entries: [], titleSlot }, cursor: null };
+      return { loaded: { header: null, entries: [], titleSlot }, cursor: null, heldChars: 0 };
     }
     const header = headerRecord as unknown as SessionHeader;
     // Only a file already in the current format can be extended later: a
@@ -613,14 +642,12 @@ export function loadSessionFileWithCursor(filePath: string, options: LoadSession
     migrateToCurrentVersion(header, entries);
     foldTitleSlot(header, titleSlot);
 
-    if (options.resolveBlobs) {
-      resolveBlobRefsInEntries(entries, { skipToolResultImages: options.skipToolResultImages });
-    }
+    if (options.resolveBlobs) heldChars += resolveBlobRefsInEntries(entries, { skipToolResultImages: options.skipToolResultImages });
 
     const loaded: LoadedSession = { header, entries, titleSlot };
-    if (!stored || (lastFromTail && records.length === 1)) return { loaded, cursor: null };
+    if (!stored || (lastFromTail && records.length === 1)) return { loaded, cursor: null, heldChars };
     const tailEntries = lastFromTail && records[records.length - 1].type !== "session" ? 1 : 0;
-    return { loaded, cursor: parseCursor(fd, read, tailEntries, stored, titleSlot !== undefined) };
+    return { loaded, cursor: parseCursor(fd, read, tailEntries, stored, titleSlot !== undefined), heldChars };
   } finally {
     closeSync(fd);
   }
@@ -656,29 +683,97 @@ export function extendLoadedSession(filePath: string, previous: CursoredSessionL
     }
     const records: Record<string, unknown>[] = [];
     let lastFromTail = false;
+    let heldChars = 0;
     const read = forEachLineSync(fd, (rawLine, terminated) => {
       const line = rawLine.trim();
       if (!line) return;
       try {
-        records.push(JSON.parse(line) as Record<string, unknown>);
+        const record = JSON.parse(line) as Record<string, unknown>;
+        heldChars += line.length - (options.prune?.(record) ?? 0);
+        records.push(record);
         lastFromTail = !terminated;
       } catch {
         // Skip malformed line (torn write).
       }
     }, cursor.offset);
     const added = records.filter((record) => record.type !== "session") as unknown as SessionEntry[];
-    if (options.resolveBlobs) {
-      resolveBlobRefsInEntries(added, { skipToolResultImages: options.skipToolResultImages });
-    }
+    if (options.resolveBlobs) heldChars += resolveBlobRefsInEntries(added, { skipToolResultImages: options.skipToolResultImages });
     const entries = previous.loaded.entries.slice(0, previous.loaded.entries.length - cursor.tailEntries);
     for (const entry of added) entries.push(entry);
     const header = { ...cursor.header };
     foldTitleSlot(header, titleSlot);
     const tailEntries = lastFromTail && records[records.length - 1].type !== "session" ? 1 : 0;
-    return { loaded: { header, entries, titleSlot }, cursor: parseCursor(fd, read, tailEntries, cursor.header, cursor.titleSlot) };
+    return {
+      loaded: { header, entries, titleSlot },
+      cursor: parseCursor(fd, read, tailEntries, cursor.header, cursor.titleSlot),
+      heldChars: previous.heldChars + heldChars,
+    };
   } catch {
     // Unreadable part-way, or a line past the string cap: a full parse decides what to report.
     return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const TAIL_SEARCH_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * The newest line of a session file that holds every `needles` text and that
+ * `accept` takes, found by reading backward from the end of the file. A
+ * message the engine just finished sits within the last few lines, so this
+ * reads kilobytes where a parse of the file reads all of it (185 MB sessions
+ * exist). Reads at most `maxBytes`; a file whose match lies deeper, or whose
+ * line does not fit, answers `undefined` as if it were not there. Lines are
+ * only parsed after the needle texts matched, so the walk costs one byte
+ * search per line, and nothing is cached or resolved.
+ */
+export function findRecordInTail(
+  filePath: string,
+  needles: readonly string[],
+  accept: (record: Record<string, unknown>) => boolean,
+  maxBytes: number,
+): Record<string, unknown> | undefined {
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch {
+    return undefined;
+  }
+  const consider = (line: Buffer): Record<string, unknown> | undefined => {
+    if (line.length === 0 || needles.some((needle) => !line.includes(needle))) return undefined;
+    try {
+      const record: unknown = JSON.parse(line.toString("utf8"));
+      return isRecord(record) && accept(record) ? record : undefined;
+    } catch {
+      return undefined; // a torn line
+    }
+  };
+  try {
+    let position = fstatSync(fd).size;
+    const floor = Math.max(0, position - maxBytes);
+    // The bytes after the last newline seen so far, in file order: the end of a line whose start is still ahead.
+    let held: Buffer[] = [];
+    while (position > floor) {
+      const length = Math.min(TAIL_SEARCH_CHUNK_BYTES, position - floor);
+      position -= length;
+      const chunk = readBytesSync(fd, position, length);
+      let end = chunk.length;
+      while (end > 0) {
+        const newline = chunk.lastIndexOf(0x0a, end - 1);
+        if (newline === -1) break;
+        const lineStart = chunk.subarray(newline + 1, end);
+        const found = consider(held.length === 0 ? lineStart : Buffer.concat([lineStart, ...held]));
+        if (found) return found;
+        held = [];
+        end = newline;
+      }
+      held.unshift(chunk.subarray(0, end));
+    }
+    // Back at the start of the file: what is held is its first line.
+    return floor === 0 ? consider(Buffer.concat(held)) : undefined;
+  } catch {
+    return undefined;
   } finally {
     closeSync(fd);
   }

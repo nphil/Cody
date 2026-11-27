@@ -279,6 +279,8 @@ lib/
   session-active-models.ts  models in use in the current run (quota popup)
   session-namer.ts  model-written session names; omp tiny role only
   session-reader.ts  session .jsonl parsing, resolveSessionPath, listAllSessions
+  lazy-blocks.ts  stubs for oversized persisted thinking / tool-call args / generic tool-result text, plus 64 KiB pages
+  lazy-pager.ts  one-page-at-a-time state machine for the "Show full" viewer
   btw.ts  /btw side questions, pure + browser-safe
   btw-history.ts  server-only reader of omp's btw-history sidecar
   sidebar-mode.ts  Side Bar view state reducer, browser-safe
@@ -336,6 +338,7 @@ components/
   HelperTierReason.tsx  the "Why this tier" line (chip + helper window)
   SubagentTranscript.tsx  transcript section of that dialog
   MessageView.tsx  one message
+  LazyDetailText.tsx  paged viewer + "Show full" stub for those blocks (state only, dropped on close)
   HomelabberApproval.tsx  approval index, useApprovalCard
   CommandPalette.tsx  ⌘K palette (cmdk)
   ImageLightbox.tsx  chat image lightbox
@@ -796,7 +799,8 @@ Details: docs/agents/distill.md
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
 - Subscribe to lifecycle+progress, NEVER "events" (`SUBAGENT_SUBSCRIPTION_LEVEL`) — 5.3 GB in 5 min froze sessions (check `/tmp/omp-rpc-output-*`).
 - Roster is run-scoped; never seed it from the parent file's task history (20+ stale chips). `GET /api/sessions/<id>/subagents` is usage-only (`subagentUsage`) and never parses the parent file; the live roster is `get_subagents`, read as soon as the event stream opens.
-- Session-file parses (`loadSessionFileCached`, `getSessionEntries`) are append-aware: a grown file parses only its new lines (`extendLoadedSession`); never add a full uncached `loadSessionFile` to a per-switch or per-image route.
+- Session-file parses (`loadSessionFileCached`, `getSessionEntries`) are append-aware: a grown file parses only its new lines (`extendLoadedSession`); never add a full uncached `loadSessionFile` to a per-switch or per-image route. All three caches share one size budget (`SESSION_PARSE_CACHE_BYTES`, `lib/session-parse-cache.ts`): a new cache of parsed sessions goes through `loadThroughParseCache`, never its own `Map` capped by entry count. Page routes (`page=1`+`deferMedia`, detail, media) read `loadSessionForHistoryPage`, the pruned parse; a field the page reads from an entry must survive `pruneEntryForHistoryPage`.
+- Replay frames are bounded by size (`lib/live-message-frames.ts`): a finished message the session file already holds is dropped from memory and re-read from the file on attach (`readPersistedMessage`); never keep a raw `message_end` frame per run without that budget.
 - A page attaches to a live chat from `/state?fast=1` (the wrapper's run phase, no `get_state`) in parallel with the transcript; its stream (`?replay=1`) gets the running helpers (`liveSubagentFrames`) and the run's last finished messages (`liveMessageFrames`, deduped and kept over the transcript landing by lib/attach-replay.ts). Never gate the stream or the helper panel on `get_state`/`get_subagents` again: a busy engine answers them seconds late.
 - Transcript route reads only needed bytes (`readSubagentTranscriptPage`), never the whole 14–21 MB file.
 - Helper-window tool-result images are deferred like the main chat's: pages carry url blocks to `subagents/[subagentId]/media?offset=&entryId=&index=` (`readSubagentTranscriptImage` reads one line; same `isDeferrableToolResultImage` index). A `blob:sha256:` ref in a helper line is NOT resolved by the page reader.

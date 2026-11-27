@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readBlobRefSync } from "@/lib/omp/session-files";
-import { isDeferrableToolResultImage, loadSessionFileCached } from "@/lib/session-reader";
+import { isDeferrableToolResultImage, loadSessionForHistoryPage } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
 /**
@@ -33,7 +33,7 @@ export async function GET(
     // just read): its toolResult images are still blob refs, exactly what the
     // deferral counted, so `index` lines up even when a blob is missing. Only
     // the one image asked for is read from the blob store.
-    const { entries, error: loadError } = loadSessionFileCached(resolved.filePath, { resolveBlobs: true, skipToolResultImages: true });
+    const { entries, error: loadError } = loadSessionForHistoryPage(resolved.filePath);
     if (loadError === "too_large") {
       return NextResponse.json({ error: "Session file is too large", code: "session_file_too_large" }, { status: 413 });
     }

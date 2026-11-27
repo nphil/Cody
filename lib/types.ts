@@ -47,6 +47,10 @@ export interface SessionEntryBase {
 export interface TextContent {
   type: "text";
   text: string;
+  /** Oversized persisted text: `text` is only a preview of this many UTF-16 units; the rest loads on demand from
+   *  `lazyEntry` (lib/lazy-blocks.ts). */
+  lazyChars?: number;
+  lazyEntry?: string;
 }
 
 /**
@@ -71,6 +75,9 @@ export interface ThinkingContent {
   thinking: string;
   /** Historical content omitted from the initial response and loaded on demand. */
   deferred?: boolean;
+  /** Oversized thinking: `thinking` is empty and this many UTF-16 units load on demand from `lazyEntry`. */
+  lazyChars?: number;
+  lazyEntry?: string;
   /**
    * omp 18.12+ (Anthropic/Bedrock): the model's prose to the user between tool
    * calls, which the provider returned as thinking. It is answer text: shown
@@ -84,6 +91,10 @@ export interface ToolCallContent {
   toolCallId: string;
   toolName: string;
   input: Record<string, unknown>;
+  /** Oversized argument strings (RFC 6901 pointer into `input` -> original UTF-16 length); each is replaced in
+   *  `input` by a preview and loads on demand from `lazyEntry`. */
+  lazyInput?: Record<string, number>;
+  lazyEntry?: string;
 }
 
 export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent | ToolCallContent;
@@ -465,7 +476,12 @@ export interface SessionTreeNode {
   entry: SessionEntry;
   children: SessionTreeNode[];
   label?: string;
+  /** Entry ids of the single-child chain this node stands for. A paged response (lib/session-history-page.ts) leaves
+   *  it out, or holds only the active leaf when the leaf sits inside the chain, and sends `compressedCount` instead. */
   compressedEntryIds?: string[];
+  /** How many entries the chain this node stands for holds. Only on a paged response's tree; prefer it over
+   *  `compressedEntryIds.length`. */
+  compressedCount?: number;
 }
 
 export interface SessionInfo {

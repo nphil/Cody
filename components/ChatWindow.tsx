@@ -23,7 +23,7 @@ import { toast } from "@/components/ui/toast";
 import { StatusTextCrossfade } from "./StatusTextCrossfade";
 import { ModelRecoveryBanner } from "./ModelRecoveryBanner";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
-import { useAgentSession, type AgentPhase, type NoticeItem, type RunningToolInfo, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type HistoryLoadStatus, type NoticeItem, type RunningToolInfo, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
 import { LiveToolOutputContext } from "@/hooks/useLiveToolOutput";
 import { formatToolElapsed } from "@/lib/live-tool-output";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -37,6 +37,7 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { hasUnverifiedLadder, resolveAvailableThinkingLevels } from "@/lib/thinking-levels";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { getNextVisibleCount, VISIBLE_PAGE_SIZE } from "@/lib/chat-lazy-load";
+import { HistoryEdgeControl, JumpToLatestButton } from "./ChatHistoryControls";
 import { captureTranscriptAnchor } from "@/lib/transcript-anchor";
 import { TranscriptViewportContext, type TranscriptViewport } from "@/components/TranscriptViewportContext";
 import { ApprovalIndexContext, HomelabberApprovalProvider, useDeadlinePassed } from "./HomelabberApproval";
@@ -459,6 +460,10 @@ interface CommittedTranscriptProps {
   holdLiveTail: boolean;
   sentinelRef: React.RefObject<HTMLButtonElement | null>;
   handleLoadMoreClick: () => void;
+  /** Earlier messages exist on the server beyond the loaded window. */
+  olderAvailable: boolean;
+  olderStatus: HistoryLoadStatus;
+  handleLoadEarlierClick: () => void;
 }
 
 /** One slot in the transcript's render window: either a single message, the
@@ -599,6 +604,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
   canFork, handleFork, canForkHere, handleForkHere, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
   activityDisplayMode, thinkingDefaultExpanded, visibleCount, nearBottom, holdLiveTail, sentinelRef, handleLoadMoreClick,
+  olderAvailable, olderStatus, handleLoadEarlierClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -802,7 +808,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   const liveTailStart = units.length - LIVE_TAIL_UNITS;
   return (
     <>
-      {hasMore && (
+      {hasMore ? (
         <button
           ref={sentinelRef}
           type="button"
@@ -811,6 +817,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
         >
           {t("chatWindow.scrollUpToLoad", { count: startIndex })}
         </button>
+      ) : olderAvailable && (
+        <HistoryEdgeControl edge="earlier" status={olderStatus} onLoad={handleLoadEarlierClick} buttonRef={sentinelRef} />
       )}
       {units.slice(startIndex).map((unit, offset) => renderUnit(unit, startIndex + offset >= liveTailStart))}
     </>
@@ -911,7 +919,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
     removeQueuedMessage, editQueuedMessage, steerQueuedNow,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
-    retryLoadSession,
+    retryLoadSession, history,
   } = useAgentSession({
     session, newSessionCwd, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -1039,6 +1047,35 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
   // nothing — the reader pin keeps the old content in view.
   const pendingRevealRef = useRef(false);
 
+  // --- Bounded history window (useAgentSession) ---
+  // The chat can be longer than what the window holds. Once every message in
+  // memory is revealed, the top control and the scroll sentinel fetch the next
+  // older page; the bottom control and its sentinel fetch newer ones while the
+  // window is away from the live end. Each page widens what is revealed by the
+  // number of messages it added, so it appears without a second click.
+  const { olderCursor, newerCursor, detached: historyDetached, liveAhead, olderStatus, newerStatus, latestStatus, loadOlder, loadNewer, returnToLive } = history;
+  const loadEarlier = useCallback(async (reveal: boolean) => {
+    const added = await loadOlder();
+    if (added === 0) return;
+    if (reveal) pendingRevealRef.current = true;
+    setVisibleCount((prev) => prev + added);
+  }, [loadOlder]);
+  const handleLoadEarlierClick = useCallback(() => { void loadEarlier(true); }, [loadEarlier]);
+  const handleLoadNewerClick = useCallback(() => { void loadNewer(); }, [loadNewer]);
+  const handleJumpToLatest = useCallback(() => { void returnToLive(); }, [returnToLive]);
+  const newerSentinelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const sentinel = newerSentinelRef.current;
+    const container = scrollContainerRef.current;
+    if (!sentinel || !container || newerCursor === null || newerStatus !== "idle") return;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0]?.isIntersecting) void loadNewer(); },
+      { root: container, rootMargin: "0px 0px 400px 0px", threshold: 0 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [newerCursor, newerStatus, messages.length, loadNewer, scrollContainerRef]);
+
   // IntersectionObserver on the sentinel banner at the top of the message
   // list. When the user scrolls near the top, load the next page of older
   // messages.
@@ -1058,7 +1095,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
           // looking at through the prepend (useAgentSession), so nothing is
           // captured here; the old distance-from-end restore ignored content
           // still streaming in at the bottom and ran after paint.
-          setVisibleCount((prev) => getNextVisibleCount(prev));
+          if (sentinel.dataset.historyEdge === "earlier") {
+            // Nothing hidden in memory any more: the next page comes from the server.
+            if (olderStatus === "idle") void loadEarlier(false);
+          } else {
+            setVisibleCount((prev) => getNextVisibleCount(prev));
+          }
         }
       },
       // Expand the root upward so the page loads while the banner is still
@@ -1068,7 +1110,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef]);
+  }, [visibleCount, messages.length, scrollContainerRef, olderStatus, loadEarlier]);
 
   // After a CLICK on the banner loaded a page, reveal it: the reader pin kept
   // the previous content in view through the prepend, so move the viewport
@@ -1257,9 +1299,13 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
   // The quota popover used to render this list itself; it now feeds the top
   // bar's session popover, which is where the rest of the session's token
   // readouts already live.
+  const { persistedCount, persistedModelTurns } = history;
   const contextModelUsage = useMemo<ContextModelUsage[]>(() => {
+    // A windowed transcript holds part of the chat: the server's per-model
+    // counts cover what it has, and only the live-only messages are added.
     const byModel = new Map<string, ContextModelUsage>();
-    for (const message of messages) {
+    for (const turn of persistedModelTurns ?? []) byModel.set(`${turn.provider}:${turn.modelId}`, { ...turn });
+    for (const message of persistedModelTurns ? messages.slice(persistedCount) : messages) {
       if (message.role !== "assistant") continue;
       const assistant = message as AssistantMessage;
       if (!assistant.provider || !assistant.model) continue;
@@ -1281,7 +1327,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
       byModel.set(key, usage);
     }
     return [...byModel.values()];
-  }, [messages]);
+  }, [messages, persistedCount, persistedModelTurns]);
 
   const modelUsageRows = useMemo<SessionModelUsage[]>(() => (
     contextModelUsage.map((entry) => ({
@@ -1598,6 +1644,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
             <NoticeShelf notices={notices} floating align="right" />
           </div>
         </div>
+        {(historyDetached || liveAhead) && <JumpToLatestButton status={latestStatus} onJump={handleJumpToLatest} />}
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
@@ -1636,11 +1683,17 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
               holdLiveTail={readerHoldsTail}
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
+              olderAvailable={olderCursor !== null}
+              olderStatus={olderStatus}
+              handleLoadEarlierClick={handleLoadEarlierClick}
             />
+            {newerCursor !== null && (
+              <HistoryEdgeControl edge="newer" status={newerStatus} onLoad={handleLoadNewerClick} buttonRef={newerSentinelRef} />
+            )}
             {/* The streaming bubble carries the index it will have once
                 committed, so a reader anchored inside it is found again in the
                 committed row that replaces it at message_end. */}
-            {streamState.isStreaming && streamState.streamingMessage && (
+            {!historyDetached && streamState.isStreaming && streamState.streamingMessage && (
               <div data-turn-index={messages.length}>
                 <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} sessionId={session?.id ?? sessionIdRef.current ?? undefined} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
               </div>

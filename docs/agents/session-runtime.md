@@ -79,6 +79,32 @@ Sections in this file:
   the parsed end (title slot excluded) mean "only appended", so only the new
   lines are parsed. An unterminated last line is parsed again next time.
   Legacy (pre-v3) files get no cursor and are always parsed whole.
+  All parses of the three caches share ONE size budget
+  (`SESSION_PARSE_CACHE_BYTES`, 128 MiB of characters held: the lines kept plus
+  the base64 that blob resolution inlined plus 256 per entry, so millions of
+  short rows count for their heap; about 2-3x that in heap;
+  `lib/session-parse-cache.ts`), least recently used out first, with count caps
+  (32 raw / 8 resolved / 8 history) inside it. A session bigger than the whole
+  budget is parsed on every read and not kept. A file that must be parsed in
+  full drops its stale parse first, so the two never coexist.
+  **The history-page parse** (`loadSessionForHistoryPage`) is the third cache,
+  read by `GET /api/sessions/[id]` and `/context` when the request has
+  `page=1` and `deferMedia` (the page client always sends both), and by the
+  detail and media routes. It is the same parse with `prune` applied to every
+  line as it is read (`pruneEntryForHistoryPage`): compaction `preserveData`,
+  an assistant message's `providerPayload` / `inputTransformations` /
+  `requestControls`, and a tool result's `details` cut to what
+  `stripToolResultDetails` sends (plus a todo result's `phases`, read by
+  `buildSessionContext`). By field sizes on a 155 MB LumaTV chat (28k entries)
+  about 60% of the file is that engine-only data, so the parse should weigh
+  about 65 MB (an estimate, not a run) and
+  stays cached and append-aware where the raw 155 MB one cannot. Text,
+  thinking, tool arguments and image refs stay whole, so detail and media
+  reads are exact. A pruned `details` is remembered in a `WeakMap` so output
+  does not project it a second time (that projection drops a task result's
+  `usage` and is not idempotent). Raw consumers (`getSessionEntries`,
+  `loadSessionFileCached`) are unchanged and still re-parse a file over the
+  budget on each read.
 - **Live attach never waits on `get_state`.** `GET /api/sessions/<id>/state?fast=1`
   answers a live session from the wrapper's own phase flags (`livePhase()`,
   via `livePhaseState` in lib/api-utils.ts), the shape of a stale
@@ -90,7 +116,23 @@ Sections in this file:
   (`liveMessageFrames`; cleared at run start, run end and compaction), which
   the events route replays after the running helpers to a stream opened with
   `?replay=1`, flagged `replayed`: they cover the gap between the page's
-  transcript read and its subscription.
+  transcript read and its subscription. They are bounded by size
+  (`lib/live-message-frames.ts`): a frame is held whole only while it is small
+  (256 KiB per run, 4 MiB across every running chat, counted in characters) or
+  while the session file does not hold it yet; a larger one the file already
+  holds shrinks to a few bytes naming the message and is read back from the
+  file when a page attaches. That lookup (`findRecordInTail`,
+  `hasPersistedMessage` / `readPersistedMessage`) never parses the file: it
+  reads backward from the end in 1 MiB steps, parses only a line that holds the
+  message's timestamp (and tool call id), resolves media blobs on that one
+  message, and gives up past a reach of 1 MiB + 2x the frame (16 MiB max) for
+  the check, 16 MiB + 2x (64 MiB max) for the read, so a 185 MB session costs
+  kilobytes. Beyond its reach a message reads as absent: its frame stays whole,
+  or is left out of the replay. A frame the file lacks is never dropped (it is
+  the only copy); a quiet run re-checks it at 0.5/2/8/30 s. The running-helper
+  roster has the same kind of cap
+  (64 KiB per frame, 1 MiB in all; an over-size frame is left to
+  `get_subagents`).
 - **A live session can MOVE to a new id** (omp 18.4.9). When another omp
   process owns the session file for writing, this one's next write moves the
   live session to a NEW sibling `.jsonl` under a NEW session id
@@ -165,6 +207,19 @@ Sections in this file:
 - **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
 - **Fork from here** (footer of a reply, omp 18.4.11+): omp's own `fork {entryId}`, sent as the web command `fork_session` (never `fork`, which is `branch` above). It KEEPS everything through that reply (a cut inside a tool-call batch is extended through its results) and the artifacts; this live process moves onto the new file like a branch, and the page follows through `onSessionForked`. `parentSession` is the parent's file path.
 - **Duplicate chat** (a session row's menu, ⌘K): `fork_session` with no entry, a whole-chat copy (`parentSession` is the parent's bare id; the sidebar links both forms). It works on a chat with no live child — the route starts one first. omp only forks an IDLE chat, so the wrapper refuses up front while it is running and omp's own `session_busy` reads the same (`fork.busy`); the controls are disabled or hidden while it works. An `Unknown command`/`unsupported` answer hides both for the page (`lib/fork-session.ts`); pi and ACP never offer them (`useForkAvailable`: omp only).
+
+### History paging (`lib/session-history-page.ts`)
+`GET /api/sessions/[id]` and `GET /api/sessions/[id]/context` return the whole branch unless asked: a long chat is megabytes, and the page only needs the bottom of it. `?page=1` is the opt-in; the legacy response (no `page`) is unchanged and `before`/`after`/`limit`/`bytes` are ignored without it. The session file on disk stays the authority; every page request reads it (through the parse cache), so a cursor never depends on browser state.
+
+- **Request.** `page=1` = the tail. `before=<id>` = strictly older than that message (exclusive), `after=<id>` = strictly newer (exclusive); both together is 400 `history_cursor_conflict`. `limit` (default 80, 1..200) and `bytes` (approximate JSON budget, default 512 KiB, 16 KiB..4 MiB) bound the page. `leafId` on `/context` picks the branch, as before.
+- **Response `context`.** The usual fields plus `olderCursor` (oldest loaded id, only when older messages exist, else `null`), `newerCursor` (newest loaded id, only when newer ones exist; `null` on the tail), `totalMessages`, `olderCount`, `newerCount`, `windowBytes`. `entryIds` stay parallel to `messages`, crash rows included (both routes merge them, so a cursor from one names the same message on the other). An empty page (after the last, before the first) has no messages and both cursors `null`. Types: `HistoryPageFields` / `PagedSessionContext`.
+- **A big record is never lost.** A page always holds at least one message, however large; otherwise it grows only while it stays inside both budgets. The message that did not fit is the first thing the cursor returns. Oversized thinking / tool-result / tool-argument text is stubbed (`deferOversizedBlocks`, `lib/lazy-blocks.ts`) in paged responses only and read through `/api/sessions/[id]/detail?entryId=...`; the byte budget is measured after stubbing.
+- **Cursors are stable.** They are entry ids, so appends never move them. One that is no longer on the branch (compacted away, other branch, wrong id) is 410 `history_cursor_not_found` (not 404, which means the session is missing); the client reloads the latest page.
+- **Totals stay whole-history.** A windowed main GET keeps `info.messageCount` (full branch), `leafId`, `modelUsage`, `planOverlay`, `agent` and the branch's current state (`todoPhases`, `goal`, `model`, `thinkingLevel`) as before (`info.firstMessage` is a preview, below), and adds top-level `historyStats` (also on `/context`) computed over the whole branch: `totalMessages`, `userMessages`, `assistantMessages`, `toolResults`, `toolCalls`, `usage` (assistant-message usage; `modelUsage` stays the billed non-message calls), `editRejections`, `modelTurns` (per provider/model turns and tokens) and `latestAssistant` (for the context meter when the window has no assistant). The client must not recompute these from the window.
+- **Tree.** In page mode the main GET's `tree` keeps its projected shape but is cut to what BranchNavigator reads: each entry is `{type,id,parentId,timestamp}` plus, for a message, `{role, content: ≤3 text blocks of 80 chars}`; node `label`s are capped at 200 chars. A single-child chain's `compressedEntryIds` (one id per entry, so a long linear branch grew the tree with every message) becomes `compressedCount`; the ids stay only as `[leafId]` when the active leaf sits inside that chain (the one membership `buildActivePath` asks about). The client's "skipped" figure is `compressedCount ?? compressedEntryIds?.length ?? 0`. The legacy tree is unchanged.
+- **`info.firstMessage`.** Capped at 200 characters in page mode (the first prompt can be megabytes and sits outside the window); the legacy response keeps all of it. The test with a 3 MB first prompt and a 1500-pair linear branch asserts the paged tail response stays under 64 KB with a tree under 4 KB.
+- **Non-omp engines.** An engine with no entry ids (`getHarness().createSession`) has only its live in-memory turn log (`lib/engine-transcript.ts`). Its messages have no stable id, but the log is append-only, so a cursor is `m:<absoluteIndex>` and `entryIds` stay `[]`. `/context` answers for these engines too (it used to 404). Ownership is the same 404 gate as every session route.
+- **Tests.** `lib/session-history-page.test.mjs` (windowing, cursors, byte budget with an oversize record, stats, tree slimming, both routes, ownership, engine fallback).
 
 ### ToolCall field normalization
 Sessions store toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and streaming event handling.

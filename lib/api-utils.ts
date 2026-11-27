@@ -8,6 +8,14 @@ import type { EngineSession } from "./harness/types";
 import { EngineCommandError } from "./harness/errors";
 import { WebRpcError } from "./rpc-manager";
 
+/** A history cursor (`before` / `after` of ?page=1, lib/session-history-page.ts)
+ *  that names no message on the branch: it was compacted away, the branch
+ *  changed, or the id is wrong. 410, not 404, so it is never read as a missing
+ *  session; the client reloads the latest page. */
+export function historyCursorGone(): NextResponse {
+  return NextResponse.json({ error: "That history position is no longer on this branch", code: "history_cursor_not_found" }, { status: 410 });
+}
+
 const SESSION_NOT_FOUND = { error: "Session not found", code: "session_not_found" } as const;
 
 /** Resolve a session id to its file path, or a 404 JSON response. Replaces the
